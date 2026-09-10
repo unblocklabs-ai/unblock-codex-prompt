@@ -57,6 +57,19 @@ unchanged state during monitoring is expected rather than a blocker. The termina
 receipt reported the Codex harness, the requested model, no reroute, and no tool
 calls. This is a bounded behavior check, not proof of compliance with every rule.
 
+Live `restore` reproduced the entire original Codex TOML byte-for-byte;
+`sync --adopt` reproduced the managed version exactly. After reinstalling the
+canonical tarball and restarting, Gateway/RPC health passed, runtime inspection
+reported the service and CLI loaded with no diagnostics, and startup logs showed
+an idempotent sync of the canonical hash. Agent/model/channel/auth configuration
+was unchanged. Bill remains enrolled on the canonical prompt.
+
+OpenClaw `2026.9.2` labels the local archive install `provenance-invalid`. Its
+installed `resolvePluginTrust` implementation assigns that fallback to this
+archive source; it is not an artifact-content tamper verdict. The explicit local
+install is loaded and works, but is not a trusted-official distribution. No trust
+policy was weakened to suppress this classification.
+
 Disk status deliberately continues to say `runtimeVerified: false`: live evidence
 is from the captured requests and behavior probe, not a permanent status claim.
 
@@ -65,3 +78,5 @@ is from the captured requests and behavior probe, not a permanent status claim.
 The repository is public. The npm release workflow is prepared but no GitHub
 Release, release tag, or npm publication was created. First publication still
 requires npm package/scope authorization and trusted-publisher or token setup.
+GitHub CI passed on the initial public commit, including Linux clean dependency
+installation, all tests, both Inspector checks, and package-content validation.
