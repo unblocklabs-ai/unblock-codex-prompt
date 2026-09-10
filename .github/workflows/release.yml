@@ -1,0 +1,40 @@
+name: Release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: npm-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+      - name: Require a release from main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Set up npm trusted publishing
+        run: npm install --global npm@11.13.0
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: npm run release:check
+      - run: npm ci
+      - run: npm run preflight
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ github.event.release.prerelease && 'next' || 'latest' }}
+        run: npm publish --access public --provenance --tag "$NPM_TAG"

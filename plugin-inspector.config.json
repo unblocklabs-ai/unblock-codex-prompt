@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "plugin": {
+    "id": "unblock-codex-prompt",
+    "priority": "high",
+    "seams": ["plugin-runtime", "manifest-contract", "sdk-surface"],
+    "sourceRoot": ".",
+    "expect": { "registrations": ["registerService", "registerCli"] }
+  },
+  "capture": { "mockSdk": true }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "@unblocklabs/unblock-codex-prompt",
+  "version": "0.1.0",
+  "description": "Manage a shared Codex base prompt for an OpenClaw agent.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist/", "prompts/", "openclaw.plugin.json", "README.md", "RELEASING.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "plugin:inspect": "plugin-inspector check --config plugin-inspector.config.json --no-openclaw",
+    "plugin:inspect:runtime": "plugin-inspector check --config plugin-inspector.config.json --no-openclaw --runtime --mock-sdk --allow-execute",
+    "preflight": "npm test && npm run plugin:inspect && npm run plugin:inspect:runtime && node scripts/check-package.mjs",
+    "release:check": "node scripts/check-release-version.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": { "toml-eslint-parser": "^1.0.3" },
+  "devDependencies": {
+    "@openclaw/plugin-inspector": "^0.3.25",
+    "@types/node": "^22.0.0",
+    "openclaw": "2026.9.2",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": { "openclaw": ">=2026.9.2" },
+  "peerDependenciesMeta": { "openclaw": { "optional": true } },
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "install": { "npmSpec": "@unblocklabs/unblock-codex-prompt", "defaultChoice": "npm", "minHostVersion": ">=2026.9.2" },
+    "release": { "publishToClawHub": false, "publishToNpm": true },
+    "compat": { "pluginApi": ">=2026.9.2", "minGatewayVersion": ">=2026.9.2" },
+    "build": { "openclawVersion": "2026.9.2", "pluginSdkVersion": "2026.9.2" }
+  },
+  "engines": { "node": ">=22.22.3" },
+  "publishConfig": { "access": "public" },
+  "license": "MIT",
+  "author": "Unblock Labs",
+  "keywords": ["openclaw", "openclaw-plugin", "codex", "prompt"],
+  "repository": { "type": "git", "url": "git+https://github.com/unblocklabs-ai/unblock-codex-prompt.git" },
+  "bugs": { "url": "https://github.com/unblocklabs-ai/unblock-codex-prompt/issues" },
+  "homepage": "https://github.com/unblocklabs-ai/unblock-codex-prompt#readme"
+}

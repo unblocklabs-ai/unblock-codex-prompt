@@ -1,0 +1,7 @@
+node_modules/
+dist/
+reports/
+work/
+*.tgz
+.DS_Store
+.env*

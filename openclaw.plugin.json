@@ -1,0 +1,19 @@
+{
+  "id": "unblock-codex-prompt",
+  "name": "Unblock Codex Prompt",
+  "version": "0.1.0",
+  "description": "Maintain an agent-scoped Codex base prompt and its model_instructions_file pointer.",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "default": "main" },
+      "agentName": { "type": "string", "minLength": 1, "maxLength": 100 }
+    }
+  },
+  "uiHints": {
+    "agentId": { "label": "OpenClaw agent ID", "help": "Only this agent's managed Codex home is modified. Defaults to main." },
+    "agentName": { "label": "Agent name", "help": "Optional name in the shared prompt. Omit for a generic opening." }
+  }
+}

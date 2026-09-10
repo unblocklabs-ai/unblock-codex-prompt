@@ -1,0 +1,2 @@
+# Preserve the source contract byte-for-byte except for its identity placeholder.
+prompts/system.md whitespace=-blank-at-eol
