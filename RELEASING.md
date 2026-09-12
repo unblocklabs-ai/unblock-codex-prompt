@@ -21,6 +21,18 @@ The package is `@unblocklabs/unblock-codex-prompt` with public access.
 - Without valid publishing credentials/trust, the release job fails; it does not
   report a successful release while skipping npm.
 
+If first-package bootstrapping is needed, an authenticated owner can publish the
+reviewed version once with `npm publish --access public`, then configure trust:
+
+```sh
+npm trust github @unblocklabs/unblock-codex-prompt --repo unblocklabs-ai/unblock-codex-prompt --file release.yml --yes
+```
+
+The Release workflow verifies the registry's tarball integrity against its own
+packed artifact before accepting an already-published version. Different bytes
+fail the job. Subsequent new versions publish through OIDC with provenance; a
+local bootstrap publication does not have GitHub Actions provenance.
+
 ClawHub publishing is not configured.
 
 ## Release checklist

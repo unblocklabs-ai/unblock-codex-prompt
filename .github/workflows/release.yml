@@ -37,4 +37,4 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ github.event.release.prerelease && 'next' || 'latest' }}
-        run: npm publish --access public --provenance --tag "$NPM_TAG"
+        run: node scripts/publish-npm.mjs
