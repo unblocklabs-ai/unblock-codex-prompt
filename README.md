@@ -1,59 +1,55 @@
 # Unblock Codex Prompt
 
-One shared Codex operating contract for your OpenClaw fleet. Install a plugin,
-set the agent's name, and update the prompt through normal plugin releases.
+A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
+**Version 0.1.0.** The frozen bridge is pinned to OpenClaw/Codex plugin 2026.9.2.
 
-The bundled contract is based on Bill's Unblock Labs prompt. Every fleet agent
-has a dedicated Mac Mini. Only the opening identity is parameterized.
+## What you control
 
-**Status:** initial development version; not yet published to npm.
+- Optional `promptUrl`: a shared policy from Fleet Prompt, replacing both bundled
+  policy files below. Agent-specific identity still comes from local documents.
+- `prompts/system.md`: the shared Codex operating contract, with an optional name.
+- `prompts/developer.md`: the reviewed OpenClaw integration policy.
+- Each agent's local snapshot of `SOUL.md`, `IDENTITY.md`, `USER.md`, its eligible
+  model-visible OpenClaw skills catalog, and a memory reference (not memory bodies).
 
-## What it does
+The snapshot replaces Codex's base instructions through `model_instructions_file`.
+With `frozenContext` enabled, a narrowly patched Codex adapter replaces the generic
+OpenClaw developer policy and suppresses only the soul, memory and OpenClaw-skills
+contributions to collaboration instructions. Default-mode and cron guidance remain.
 
-- Renders `prompts/system.md` into `<agentDir>/codex-home/unblock-codex-prompt.md`.
-- Sets that agent's `model_instructions_file` in `codex-home/config.toml`.
-- Synchronizes on Gateway service startup and plugin configuration reload.
-- Preserves unrelated TOML byte-for-byte by editing the parsed value range.
-- Provides read-only status, explicit synchronization, and pointer restoration.
+**Still live and untouched:** native AGENTS.md, native skills, tool schemas and
+executor protocol, sandbox/approvals, native collaboration, channel/time/routing
+context and user messages. `extraSystemPrompt` is retained. This is not total
+prompt ownership; other plugins/hooks can still add instructions.
 
-This replaces **Codex's base instructions**, not OpenClaw's developer policy.
-It does not use a prompt hook, change tool permissions/auth/models, fetch prompts
-over the network, or modify the user's global `~/.codex` configuration.
+Customer documents stay on each agent's machine, outside this package. Snapshot
+files use private permissions. Missing identity documents are recorded as absent.
 
-## Requirements
+## Compatibility
 
-- OpenClaw **2026.9.2+** and its official Codex harness.
-- The harness's managed local stdio transport and `homeScope: "agent"`.
-- One target agent per plugin installation, default `main`. Set `agentId` to
-  target a different configured agent. Other agents are untouched.
+- Frozen bridge: **OpenClaw 2026.9.2 and @openclaw/codex 2026.9.2 only**. The exact
+  original adapter SHA-256 is checked before patching. Unknown builds are refused.
+- Managed local stdio Codex, agent-scoped home, no custom command/arguments.
+- One target agent per installation. Other agents use upstream behavior. Native
+  children may inherit the parent's frozen context.
 
-Custom app-server commands/arguments and user-scoped or external transports are
-refused: those can bypass the managed home or override the prompt. Native Codex
-profiles/project configuration can also supersede settings; disk status is not
-proof of the effective prompt. Verify the actual request after provisioning.
+This bridge uses two private upstream seams because public prompt hooks cannot
+fix the dropped-context path: one skill-catalog builder and two entry points in
+one Codex adapter bundle. It is deliberately version-pinned, not upgrade-proof.
+The catalog uses OpenClaw's eligibility, allowlist, visibility and size-limit
+logic. Session-specific and execution-directory skills are not snapshotted.
+Remote-node-only skills are not added; this is for dedicated local Mac agents.
 
-## Install and configure
-
-Before the first npm release, build and install a local tarball:
+## Install and enroll
 
 ```sh
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.1.0.tgz --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.1.0.tgz --force --accept-capabilities
 ```
 
-After publication, the install command will be:
-
-```sh
-openclaw plugins install npm:@unblocklabs/unblock-codex-prompt --accept-capabilities
-```
-
-The plugin runs a local file-managing startup service. Review and accept its
-capabilities during installation. Local archives also require confirming the
-non-ClawHub source (use `--force` only for a trusted archive).
-
-Include `unblock-codex-prompt` in `plugins.allow` if you use an allowlist. Configure:
+Include the plugin in `plugins.allow` if applicable, then configure:
 
 ```json5
 {
@@ -61,100 +57,173 @@ Include `unblock-codex-prompt` in `plugins.allow` if you use an allowlist. Confi
     entries: {
       "unblock-codex-prompt": {
         enabled: true,
-        config: { agentName: "Bill" }
+        config: {
+          agentId: "main", agentName: "Bill", frozenContext: true,
+          promptUrl: "https://fleet-prompt.unblocklabs.ai/prompt?channel=dev"
+        }
       }
     }
   }
 }
 ```
 
-Options:
+`agentId` defaults to `main`; `agentName` is optional. `frozenContext` defaults to
+false for existing base-prompt-only users. No conversation-access hook grant is
+needed. After initial enrollment, `promptUrl` enables daily shared-prompt refresh
+and overdue startup catch-up. Startup never rebuilds local context or patches the
+adapter. The optional model-catalog service can also refresh metadata.
 
-- `agentName`: optional, single line, 1–100 characters. Omit for “You are an
-  OpenClaw agent…” rather than copying identity from another file.
-- `agentId`: optional, defaults to `main`.
+`promptUrl` requires `frozenContext`. Use `channel=dev` for Bill and `channel=prod`
+for approved fleet deployments. The URL must use HTTPS without embedded credentials
+or a fragment. Sync fetches without authentication, refuses redirects, and checks
+plain-text content, a 256 KiB limit, UTF-8, and the endpoint's SHA-256
+`X-Prompt-Revision` header, with a ten-second request timeout. These integrity
+checks are not a signature; the configured HTTPS publisher controls the policy.
 
-For an existing custom prompt, review the original, then explicitly enroll:
+The remote text replaces the bundled Codex contract; a short developer-layer
+pointer replaces OpenClaw's generic developer policy instead of retaining the old
+`prompts/developer.md` policy copy. The frozen local context is still appended.
+No local documents are sent to the Worker. The installed snapshot is the local
+last-known-good copy: a failed fetch aborts sync before writes, never silently
+falls back to a bundled prompt, and does not disrupt normal turns. Status shows
+the installed URL/revision separately from the configured URL, without fetching.
+
+Back up configuration and drain active work. Inspect the installed official
+Codex package location, then use that exact directory:
 
 ```sh
+openclaw plugins inspect codex --json
+openclaw codex-prompt sync --adopt --codex-plugin-dir /absolute/path/to/@openclaw/codex
 openclaw codex-prompt status
-openclaw codex-prompt sync --adopt
 ```
 
-The plugin refuses to take over an existing pointer automatically. With no
-existing pointer, enabling it permits initial provisioning. Back up your config
-before first installation; the plugin's private enrollment file stores only the
-previous pointer, not a full credential-bearing config or original prompt copy.
-Leave the original prompt file in place if you need rollback.
+`--adopt` explicitly takes ownership of an existing custom prompt pointer. Its
+previous value is retained for restoration; leave the original file in place.
+First frozen sync compiles local documents/catalog and installs the guarded
+adapter patch with a private original-source backup. Later syncs reuse its receipt.
 
-## Update and activate
-
-Edit the canonical template in this repository, release a version, and roll that
-version out using your normal fleet plugin-update process. Each host renders its
-own configured name. Do not hand-edit the generated Markdown: sync replaces it.
+## Refresh and activate
 
 ```sh
-openclaw plugins update unblock-codex-prompt
 openclaw codex-prompt sync
 openclaw codex-prompt status
 ```
 
-**File changes do not update an already-running Codex thread.** After syncing,
-drain active work, restart the Gateway/managed app-server, and verify with a fresh
-conversation. Existing conversations can retain earlier base instructions. This
-plugin never resets sessions, interrupts work, or restarts services for you.
+Only explicit `sync` rebuilds local documents, skills, and the adapter policy.
+With `promptUrl`, the daily service fetches the configured Worker channel and
+replaces only the shared prompt prefix when its content changes. The existing
+frozen context is preserved byte-for-byte, without rereading workspace files.
+Editing a source document or restarting does not rebuild that local snapshot.
+Skill bodies remain files the model reads when triggered; their contents are not
+frozen. The catalog and its selection are frozen.
 
-The startup service is a convenience, not a pre-inference readiness gate. Initial
-enrollment and controlled updates should explicitly sync before activation.
-Service errors are reported by OpenClaw; they do not globally block inference.
-`status` compares disk contents with this installed template and always reports
-`runtimeVerified: false` rather than claiming live adoption.
+**After sync, drain work, restart the Gateway/managed app-server, and use new
+conversations.** Existing native threads may retain earlier base instructions.
+The plugin never interrupts or resets sessions. Capture an actual request after
+provisioning or upgrades; `status` is disk evidence, not live adoption.
 
-## Restore or uninstall
+The patched assembly boundary validates enrollment, pointer and compiled prompt
+hash before replacing/suppressing context. Invalid state aborts assembly.
+This guard does not attest to an old thread's retained prompt or detect every
+possible higher-priority Codex config override. An upgrade replacing the adapter
+removes the guard; startup status is diagnostic, not a global inference gate.
+Restore before upgrading, then revalidate compatibility before reenrollment.
+
+### Daily shared-prompt refresh
+
+No additional setting is needed beyond an enrolled `promptUrl`. The service checks
+every 24 hours while the Gateway runs and catches up when overdue on startup.
+Use `openclaw codex-prompt refresh` to run the same remote-prompt and enabled
+model-catalog refresh immediately, without resnapshotting local context.
+
+Both components are attempted independently: a catalog outage cannot prevent a
+prompt update, or vice versa. Failed fetches or validation keep the installed
+copy; failures retry hourly. Unchanged prompt content is not rewritten. Status
+includes the remote revision and last successful `checkedAt` timestamp. Updates
+are intended for fresh conversations; existing conversations are left alone.
+The plugin never restarts the Gateway automatically.
+
+Existing remote snapshots migrate their shared/context boundary without rereading
+agent files. Ambiguous or externally modified snapshots are refused rather than
+guessed; inspect them and use explicit `sync` to rebuild when appropriate.
+
+## Optional daily model-catalog refresh
+
+Set `suppressExplicitDelegationPrompt: true` alongside `frozenContext: true`, then
+run `openclaw codex-prompt sync` (or `openclaw codex-prompt refresh-catalog` for
+catalog-only updates on an already enrolled agent).
+
+The plugin fetches the configured Codex provider's `/models` endpoint using its
+existing `env_key` credential. The credential must be available in the OpenClaw
+process environment; OAuth-only/command-auth providers are not implemented. The
+endpoint must return a full Codex `models` catalog, not only an OpenAI-style
+`data` list. The managed model cache supplies only the client-version query
+parameter, never the catalog contents.
+
+The plugin preserves upstream model fields and sets only
+`model_messages.multi_agent.mode.explicit` to an empty string on each model. It
+writes `unblock-codex-models.json` in the managed Codex home and sets the top-level
+`model_catalog_json` pointer. It refuses to overwrite another owner's pointer.
+Manual edits to this generated catalog are intentionally replaced on refresh.
+
+While the Gateway is running, the service refreshes every 24 hours and catches
+up if overdue on startup. Failures retain the installed catalog and retry hourly;
+there is no fallback to stale cached metadata. Stopping the service cancels its
+timer and waits for an in-flight refresh. Status exposes last/next refresh times
+and verifies the local catalog hash without fetching. A successful catalog-only
+`refresh-catalog` never changes the fleet prompt or local context snapshot. The
+daily service and `refresh` also check the shared prompt when `promptUrl` is set.
+
+Restart the Gateway after first activating the catalog pointer. On the validated
+managed Codex 0.153.4 build, a fresh conversation adopted refreshed catalog
+contents without a Gateway restart. Content-only updates report
+`newSessionRequired: true`, but `restartRequired: false`. Existing conversations
+are not reset, and their adoption is not guaranteed. The plugin never restarts
+the Gateway automatically; revalidate this behavior when upgrading Codex.
+
+## Restore
 
 ```sh
 openclaw codex-prompt restore
 openclaw codex-prompt status
-openclaw plugins uninstall unblock-codex-prompt
 ```
 
-Restore only changes the prompt pointer back to its pre-enrollment value (or
-removes the key if it was absent). It refuses to overwrite a foreign pointer,
-pauses automatic management, and retains the generated prompt and enrollment
-record. Explicit `sync --adopt` re-enrolls it. Restart and use a fresh conversation
-to validate restoration as well.
+Restore recovers exact original adapter bytes, deactivates enrollment and restores
+the previous TOML pointer. It refuses foreign edits and retains backup, receipt
+and generated files. Restart and use fresh conversations to activate it.
+Restore **before** disabling/uninstalling or changing target agents. Disabling
+without restoring leaves the frozen base but re-enables live injections.
 
-Uninstalling without restoring deliberately leaves the last generated prompt and
-pointer working. Files live outside the package directory, so uninstall does not
-break Codex by deleting its prompt. Removing generated files is a separate,
-operator-owned cleanup after verifying no config points to them.
+## Safety and scope
 
-## Safety and limitations
+- No model-provider endpoint, model, credential or permission changes. Explicit
+  sync/daily refresh can download the public prompt; opt-in catalog refresh uses the existing
+  provider authentication path. Credentials are never written into catalog files.
+- Parsed TOML edits preserve unrelated bytes. Regular-file checks, atomic swaps,
+  concurrency checks and a prompt sync lock protect updates. There is no
+  cross-file transaction; inspect a failed sync and rerun after resolving errors.
+- Do not run concurrent sync/install/restore operations. If a crash left an empty
+  lock directory, confirm no sync is running before removing it.
+- A prompt guides behavior; it is not a security boundary or obedience guarantee.
+- Frozen prompts do not inherit upstream base-policy improvements. Review upgrades.
+- Never commit customer snapshots, raw captures, credentials or host backups.
 
-- Atomic same-directory file replacement and a per-agent sync lock protect normal
-  updates. The plugin rejects symlinked paths, hard-linked files, malformed TOML,
-  invalid state, and detected concurrent edits. It does not coordinate with every
-  possible external TOML writer or provide a multi-file filesystem transaction.
-- If sync crashes, inspect the reported empty lock directory and confirm no sync
-  is running before removing it. Re-run explicit sync; rollback information is
-  written before changing the prompt pointer.
-- A prompt is behavior guidance, not an authorization or security boundary.
-- Replacing upstream base instructions means upstream prompt improvements are
-  not automatically inherited. Revalidate when upgrading Codex/OpenClaw.
-- No raw request captures, credentials, host backups, or conversation histories
-  belong in this repository or the published package.
-
-## Development
+## Development and release
 
 ```sh
-npm ci
 npm run preflight
 npm run release:check -- v0.1.0
 ```
 
-Tests cover preservation, personalization, idempotence, updates, ownership,
-rollback, malformed input, linked files, and side-effect-free registration.
-See [RELEASING.md](RELEASING.md) for the release-on-GitHub-Release npm workflow.
+Tests cover compilation, explicit refresh, native/private-body exclusion,
+target/disabled/restored behavior, cron/default preservation, malformed state,
+pointer ownership and foreign edits. See [VALIDATION.md](VALIDATION.md) for live
+proof and limits.
+
+Install with
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.1.0 --accept-capabilities`.
+The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
+GitHub Release is published. Normal pushes do not release the package.
 
 References: [Codex configuration](https://developers.openai.com/codex/config-reference),
 [OpenClaw Codex hook boundaries](https://docs.openclaw.ai/plugins/codex-harness-runtime/hooks).

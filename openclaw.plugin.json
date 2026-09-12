@@ -9,11 +9,17 @@
     "additionalProperties": false,
     "properties": {
       "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "default": "main" },
-      "agentName": { "type": "string", "minLength": 1, "maxLength": 100 }
+      "agentName": { "type": "string", "minLength": 1, "maxLength": 100 },
+      "frozenContext": { "type": "boolean", "default": false },
+      "promptUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+      "suppressExplicitDelegationPrompt": { "type": "boolean", "default": false }
     }
   },
   "uiHints": {
     "agentId": { "label": "OpenClaw agent ID", "help": "Only this agent's managed Codex home is modified. Defaults to main." },
-    "agentName": { "label": "Agent name", "help": "Optional name in the shared prompt. Omit for a generic opening." }
+    "agentName": { "label": "Agent name", "help": "Optional name in the shared prompt. Omit for a generic opening." },
+    "frozenContext": { "label": "Frozen context bridge", "help": "Opt in to the reviewed OpenClaw 2026.9.2 adapter. Initial setup requires explicit sync and activation. Local documents and skills stay frozen until another sync." },
+    "promptUrl": { "label": "Fleet prompt endpoint", "help": "Public HTTPS plain-text endpoint with X-Prompt-Revision SHA-256. After initial sync, refreshed daily and when overdue on startup without refreshing agent context. Requires frozenContext; replaces both bundled policy files." },
+    "suppressExplicitDelegationPrompt": { "label": "Suppress conflicting Codex delegation policy", "help": "Manage a model_catalog_json override, refreshed from the configured provider daily and when overdue on startup. Requires frozenContext and an available provider env_key. Generated-file edits are replaced on refresh." }
   }
 }

@@ -4,7 +4,9 @@ import { dirname, join, resolve } from "node:path";
 import { readPromptPointer, setPromptPointer } from "./toml.js";
 
 type Enrollment = { schema: 1; active: boolean; previousPointer: string | null };
-export type PromptTarget = { agentDir: string; prompt: string };
+export type FrozenBundle = { schema: 1; policy: string; sources: { name: string; sha256: string | null }[]; skillCount: number; basePromptLength?: number; remotePrompt?: { url: string; revision: string; checkedAt?: number } };
+export const FROZEN_CONTEXT_HEADER = "\n\n## Frozen agent context\n";
+export type PromptTarget = { agentDir: string; prompt: string; bundle?: FrozenBundle };
 
 function paths(target: PromptTarget) {
   const home = join(resolve(target.agentDir), "codex-home");
@@ -14,6 +16,7 @@ function paths(target: PromptTarget) {
     prompt: join(home, "unblock-codex-prompt.md"),
     state: join(home, ".unblock-codex-prompt.json"),
     lock: join(home, ".unblock-codex-prompt.lock"),
+    bundle: join(home, ".unblock-codex-prompt-bundle.json"),
   };
 }
 
@@ -32,7 +35,7 @@ async function assertDirectoryChain(path: string): Promise<void> {
   if (stat && !stat.isDirectory()) throw new Error(`Expected a real directory, not a symlink or file: ${path}`);
 }
 
-async function readOptional(path: string) {
+export async function readOptional(path: string) {
   const stat = await statOptional(path);
   if (!stat) return null;
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error(`Refusing non-regular, linked, or shared file: ${path}`);
@@ -78,7 +81,7 @@ export async function promptStatus(target: PromptTarget) {
   };
 }
 
-async function replaceFile(path: string, previous: string | null, contents: string) {
+export async function replaceFile(path: string, previous: string | null, contents: string) {
   if (previous === contents) return false;
   const mode = (await statOptional(path))?.mode ?? 0o600;
   const temporary = join(dirname(path), `.${randomUUID()}.prompt-tmp`);
@@ -92,7 +95,7 @@ async function replaceFile(path: string, previous: string | null, contents: stri
   return true;
 }
 
-async function withLock<T>(target: PromptTarget, operation: () => Promise<T>) {
+export async function withLock<T>(target: PromptTarget, operation: () => Promise<T>) {
   const files = paths(target);
   await assertDirectoryChain(files.home);
   await mkdir(files.home, { recursive: true, mode: 0o700 });
@@ -127,8 +130,10 @@ export async function syncPrompt(target: PromptTarget, options: { adopt?: boolea
     // Save rollback information first; point Codex at the file only after it exists.
     const stateChanged = await replaceFile(s.files.state, s.state, `${JSON.stringify(enrollment, null, 2)}\n`);
     const promptChanged = await replaceFile(s.files.prompt, s.prompt, target.prompt);
+    const bundleChanged = target.bundle ? await replaceFile(s.files.bundle, await readOptional(s.files.bundle),
+      `${JSON.stringify({ ...target.bundle, promptSha256: sha256(target.prompt) }, null, 2)}\n`) : false;
     const configChanged = await replaceFile(s.files.config, s.config, nextConfig);
-    return { changed: stateChanged || promptChanged || configChanged, promptChanged, configChanged, sha256: sha256(target.prompt), activation: "New Codex session required; existing threads may retain old instructions." };
+    return { changed: stateChanged || promptChanged || configChanged || bundleChanged, promptChanged, configChanged, sha256: sha256(target.prompt), activation: "Restart the managed app-server and use a new Codex session; existing threads may retain old instructions." };
   });
 }
 
@@ -146,5 +151,44 @@ export async function restorePrompt(target: PromptTarget) {
     await replaceFile(s.files.state, s.state, `${JSON.stringify({ ...s.enrollment, active: false }, null, 2)}\n`);
     const changed = await replaceFile(s.files.config, s.config, nextConfig);
     return { changed, restored: true, retainedPromptPath: s.files.prompt };
+  });
+}
+
+/** Replace only the shared prefix; never reread workspace documents or skills. */
+export async function refreshSharedPrompt(agentDir: string, fetchBase: () => Promise<{ prompt: string; source: { url: string; revision: string } }>, now = Date.now()) {
+  const target = { agentDir, prompt: "" };
+  return withLock(target, async () => {
+    const s = await snapshot(target);
+    if (!s.enrollment?.active) return { changed: false, skipped: true };
+    if (s.pointer !== s.files.prompt || s.prompt === null) throw new Error("Managed prompt pointer missing or changed; refusing refresh");
+    const previousBundle = await readOptional(s.files.bundle);
+    const bundle: unknown = JSON.parse(previousBundle ?? "null");
+    if (!bundle || typeof bundle !== "object" || !("schema" in bundle) || bundle.schema !== 1 ||
+        !("promptSha256" in bundle) || bundle.promptSha256 !== sha256(s.prompt) ||
+        !("policy" in bundle) || typeof bundle.policy !== "string" || !bundle.policy.trim() ||
+        !("remotePrompt" in bundle) || !bundle.remotePrompt) {
+      throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync");
+    }
+    // Legacy snapshots can migrate only when the compiler boundary is unambiguous.
+    const boundary = "basePromptLength" in bundle ? bundle.basePromptLength : s.prompt.indexOf(FROZEN_CONTEXT_HEADER);
+    if (typeof boundary !== "number" || !Number.isInteger(boundary) || boundary <= 0 ||
+        !s.prompt.slice(boundary).startsWith(FROZEN_CONTEXT_HEADER) ||
+        (!("basePromptLength" in bundle) && boundary !== s.prompt.lastIndexOf(FROZEN_CONTEXT_HEADER))) {
+      throw new Error("Frozen context boundary is ambiguous; run codex-prompt sync");
+    }
+    const remote = await fetchBase();
+    if (!remote.prompt.trim() || remote.source.revision !== sha256(remote.prompt)) throw new Error("Invalid shared prompt revision");
+    if (await readOptional(s.files.config) !== s.config || await readOptional(s.files.state) !== s.state) throw new Error("Enrollment or configuration changed during refresh");
+    const prompt = remote.prompt.trim() + s.prompt.slice(boundary);
+    const nextBundle = `${JSON.stringify({ ...bundle, basePromptLength: remote.prompt.trim().length,
+      remotePrompt: { ...remote.source, checkedAt: now }, promptSha256: sha256(prompt) }, null, 2)}\n`;
+    const changed = await replaceFile(s.files.prompt, s.prompt, prompt);
+    try { await replaceFile(s.files.bundle, previousBundle, nextBundle); }
+    catch (error) {
+      // Roll back the prompt if publishing its receipt failed; never overwrite a concurrent edit.
+      if (changed) await replaceFile(s.files.prompt, prompt, s.prompt);
+      throw error;
+    }
+    return { changed, revision: remote.source.revision, checkedAt: now, newSessionRequired: changed };
   });
 }

@@ -4,7 +4,7 @@ export function parseConfig(raw: unknown) {
   const value = raw ?? {};
   if (typeof value !== "object" || Array.isArray(value)) throw new Error("Plugin config must be an object");
   for (const key of Object.keys(value)) {
-    if (key !== "agentId" && key !== "agentName") throw new Error(`Unknown plugin option: ${key}`);
+    if (key !== "agentId" && key !== "agentName" && key !== "frozenContext" && key !== "promptUrl" && key !== "suppressExplicitDelegationPrompt") throw new Error(`Unknown plugin option: ${key}`);
   }
   const agentId = "agentId" in value ? value.agentId : "main";
   const agentName = "agentName" in value ? value.agentName : undefined;
@@ -15,7 +15,26 @@ export function parseConfig(raw: unknown) {
       agentName.length > 100 || /\p{C}/u.test(agentName))) {
     throw new Error("agentName must be 1–100 characters without control characters");
   }
-  return { agentId, agentName: agentName?.trim() };
+  const frozenContext = "frozenContext" in value ? value.frozenContext : false;
+  if (typeof frozenContext !== "boolean") throw new Error("frozenContext must be boolean");
+  const promptUrl = "promptUrl" in value ? value.promptUrl : undefined;
+  if (promptUrl !== undefined) {
+    if (typeof promptUrl !== "string") throw new Error("promptUrl must be an HTTPS URL");
+    validatePromptUrl(promptUrl);
+    if (!frozenContext) throw new Error("promptUrl requires frozenContext to replace the OpenClaw policy too");
+  }
+  const suppressExplicitDelegationPrompt = "suppressExplicitDelegationPrompt" in value ? value.suppressExplicitDelegationPrompt : false;
+  if (typeof suppressExplicitDelegationPrompt !== "boolean") throw new Error("suppressExplicitDelegationPrompt must be boolean");
+  if (suppressExplicitDelegationPrompt && !frozenContext) throw new Error("suppressExplicitDelegationPrompt requires frozenContext");
+  return { agentId, agentName: agentName?.trim(), frozenContext, promptUrl, suppressExplicitDelegationPrompt };
+}
+
+export function validatePromptUrl(value: string) {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+    throw new Error("promptUrl must use HTTPS without credentials or a fragment");
+  }
+  return url;
 }
 
 export function renderPrompt(template: string, agentName?: string) {

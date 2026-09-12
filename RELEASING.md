@@ -1,6 +1,6 @@
 # Releasing
 
-Publishing requires explicit owner approval. No release has been made yet.
+Publishing requires explicit owner approval.
 
 This mirrors the `unblock-memory` release-on-release workflow: normal pushes and
 pull requests run CI only. A **published GitHub Release** runs npm publication.

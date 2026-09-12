@@ -2,7 +2,7 @@ import { parseTOML } from "toml-eslint-parser";
 
 const KEY = "model_instructions_file";
 
-function promptEntry(source: string) {
+function promptEntry(source: string, key = KEY) {
   let ast;
   try {
     ast = parseTOML(source, { tomlVersion: "1.0" });
@@ -18,22 +18,22 @@ function promptEntry(source: string) {
   if (entries.some((node) => keyName(node) === "experimental_instructions_file")) {
     throw new Error("Migrate experimental_instructions_file before enrolling this agent");
   }
-  const entry = entries.find((node) => keyName(node) === KEY);
+  const entry = entries.find((node) => keyName(node) === key);
   if (entry && (entry.key.keys.length !== 1 || entry.value.type !== "TOMLValue" || entry.value.kind !== "string")) {
-    throw new Error("model_instructions_file must be a top-level string");
+    throw new Error(`${key} must be a top-level string`);
   }
   return entry;
 }
 
-export function readPromptPointer(source: string): string | null {
-  const value = promptEntry(source)?.value;
+export function readPromptPointer(source: string, key = KEY): string | null {
+  const value = promptEntry(source, key)?.value;
   return value?.type === "TOMLValue" && value.kind === "string" ? value.value : null;
 }
 
 /** Edit the parsed value's range, not a regex or a reserialized TOML document. */
-export function setPromptPointer(source: string, pointer: string | null) {
-  const entry = promptEntry(source);
-  if (readPromptPointer(source) === pointer) return source;
+export function setPromptPointer(source: string, pointer: string | null, key = KEY) {
+  const entry = promptEntry(source, key);
+  if (readPromptPointer(source, key) === pointer) return source;
   let result: string;
   if (entry) {
     const [start, end] = pointer === null ? entry.range : entry.value.range;
@@ -41,8 +41,8 @@ export function setPromptPointer(source: string, pointer: string | null) {
   } else {
     if (pointer === null) return source;
     const newline = source.includes("\r\n") ? "\r\n" : "\n";
-    result = `${KEY} = ${JSON.stringify(pointer)}${newline}${source}`;
+    result = `${key} = ${JSON.stringify(pointer)}${newline}${source}`;
   }
-  if (readPromptPointer(result) !== pointer) throw new Error("TOML pointer verification failed");
+  if (readPromptPointer(result, key) !== pointer) throw new Error("TOML pointer verification failed");
   return result;
 }

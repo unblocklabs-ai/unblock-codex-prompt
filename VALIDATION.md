@@ -1,4 +1,170 @@
-# Validation — 2026-09-10
+# Validation
+
+## Daily shared Cloudflare prompt refresh — 2026-09-12
+
+- An enrolled `promptUrl` now participates in the daily service, including overdue
+  startup catch-up. `codex-prompt refresh` checks the shared prompt and enabled
+  model catalog immediately. No Worker deployment or new configuration is needed.
+- Shared-prefix replacement preserves the frozen context bytes, source hashes,
+  skill count, and developer pointer policy. It never rebuilds agent documents
+  or skills. Unchanged prompt content does not rewrite the prompt file.
+- Bill's existing remote snapshot migrated automatically on startup, preserving
+  the complete unchanged prompt. A temporary local-only revision marker was then
+  inserted into the shared prefix. No Cloudflare prompt was modified.
+- Before/after requests captured through Bill's localhost receiver: Astra with
+  the marker, Astra after refresh without restart, and Sol after refresh. The
+  latter requests contain the real Cloudflare dev prompt without the marker.
+  All contain the exact compiled prompt once and retain frozen context, native
+  AGENTS.md, delegation mechanics, and tool declarations; the restrictive
+  `<multi_agent_mode>` remains absent.
+- The capture provider deliberately lacked catalog authentication. Combined
+  refresh reported that failure but still updated the shared prompt successfully.
+  After restoring the configured provider, both refresh components succeeded.
+- A second local marker with an overdue timestamp was removed automatically by
+  service startup. All frozen source hashes and the 48-skill count were preserved.
+- `npm run preflight`: **26 tests pass**, both Inspector checks and package checks
+  pass (same two advisory Inspector evidence gaps). New focused tests cover
+  prefix-only replacement, unchanged-file behavior, validation failure retention,
+  legacy/ambiguous boundaries, restored enrollment, and receipt-write rollback.
+- Installed runtime files match the local build hashes. Bill's normal API config
+  was restored byte-for-byte; Gateway health passed and the receiver stopped.
+  No npm release, GitHub push, other-node deployment, or Cloudflare write occurred.
+
+These synthetic captures prove request composition, not real-model obedience.
+Fresh-session adoption is verified on managed Codex 0.153.4 with OpenClaw and its
+Codex plugin 2026.9.2; existing conversations were not reset or tested for adoption.
+Daily interval/retry behavior is fake-clock tested, with live overdue startup
+verification rather than an elapsed 24-hour wait. OpenClaw plugin skills guided
+package/lifecycle validation; OpenAI Docs confirmed the instruction-file surface.
+
+The following sections are historical; their explicit-sync-only shared-prompt
+limitations are superseded by the daily shared-prompt behavior above.
+
+## Daily model-catalog refresh — 2026-09-12
+
+- Implemented and enabled the opt-in catalog service on Bill. It fetches fresh
+  metadata from his configured provider, preserves model metadata except
+  `model_messages.multi_agent.mode.explicit`, and manages `model_catalog_json`.
+  All 12 models have that explicit-delegation-policy field set to an empty string.
+- Deliberately changed every generated model's display name and explicit policy
+  to a diagnostic marker. A fresh Astra request contained the altered policy.
+  `openclaw codex-prompt refresh-catalog` removed both edits from fresh upstream
+  metadata. A second fresh Astra request, **without a Gateway restart**, omitted
+  the marker and `<multi_agent_mode>` block.
+- Further fresh Astra and Sol requests after restart also omit the restrictive
+  block. Each contains the exact XML-wrapped compiled prompt once, native
+  AGENTS.md, skills/Default-mode guidance, delegation mechanics, and actual tool
+  declarations (carried as an `additional_tools` input item on this Codex build).
+  Astra's delegation mechanics were byte-identical across its three captures.
+- The initial Sol check incorrectly required `<multi_agent_role>` wrappers.
+  Inspection showed Sol's native mechanics are present without that wrapper;
+  corrected read-only checks against all four retained requests pass. This was
+  a test assertion error, not missing runtime instructions.
+- Damaged the generated catalog again and made its refresh receipt overdue.
+  Gateway service startup repaired it automatically. The final catalog hash
+  matches its receipt, with last/next refresh timestamps 24 hours apart.
+- `npm run preflight`: **22 tests pass**, including repair, upstream failure
+  retention, ownership/restore, provider authentication, and fake-clock daily
+  scheduling/hourly retry/stop. Both Inspector checks and package checks pass;
+  the same two advisory proof gaps remain. A real 24-hour wait was not performed.
+- Normal API routing was restored byte-for-byte against the pre-capture config;
+  Gateway health passed and the test receiver stopped. Only Bill was updated.
+  No npm publication, GitHub push, or Worker deployment occurred.
+
+Catalog-only refresh does **not** refresh the shared Worker prompt or frozen
+workspace/skills snapshot. Those still require explicit `sync`. First catalog
+pointer activation was tested with a restart; content-only refresh was adopted
+by a fresh conversation without one. Existing-conversation adoption was not
+tested. Results are pinned to managed Codex 0.153.4 and OpenClaw/Codex plugin
+2026.9.2. The receiver returns synthetic replies: these tests prove request
+composition, not model obedience or tool execution.
+
+OpenClaw plugin skills guided package/lifecycle validation; OpenAI Docs supplied
+the documented `model_catalog_json` configuration surface.
+
+## Fleet Prompt dev endpoint — 2026-09-12
+
+- Configured Bill with `promptUrl` selecting Fleet Prompt's dev channel. The
+  packaged plugin fetched and SHA-256-validated the public HTTPS response during
+  explicit sync. No customer context was uploaded to the Worker.
+- `npm run preflight`: **17 tests pass**, build, both Inspector checks and packed
+  file checks pass. Inspector retains two advisory proof gaps; real installed
+  runtime inspection imported the plugin, found its service/CLI, and returned no
+  diagnostics. No npm publication or GitHub push was performed for this change.
+- Two fresh no-delivery Responses requests, Astra and Sol, each contain exactly
+  one complete remote policy inside exactly one compiled base. This Codex build
+  carries the base as a developer input item, not top-level `instructions`.
+- Remote policy: **27,932 bytes**,
+  SHA-256 `decbcffc93f21e5c71c05bf0a92ab07c2f040d030833c282345b3ca402d73880`.
+- Compiled local snapshot: **48,481 bytes**, 48 eligible OpenClaw skills,
+  SHA-256 `a922a41e99d75004fa87f81f6a0793fe26ef4022a034ab4e581414e67a767a72`.
+  Codex trims outer whitespace in the request; exact comparison accounts for it.
+- The former bundled OpenClaw developer policy and generic OpenClaw policy are
+  absent. A short pointer to the shared base replaces that policy layer. Live
+  OpenClaw soul, memory and skills contributions remain suppressed, with local
+  frozen context present in the compiled base.
+- Native AGENTS.md, native skills, Default-mode guidance, native multi-agent
+  instructions, permission/executor instructions, temporal context and actual
+  tool declarations remain separate. This does **not** suppress every developer
+  message or every other plugin's contribution.
+- The temporary localhost Responses provider was removed; Codex TOML matches
+  its pre-deployment bytes exactly. Gateway health passed after restarting onto
+  normal routing. The receiver stopped; private backups/captures remain on Bill.
+
+The existing receiver returns synthetic replies. These captures establish prompt
+composition, not model obedience or execution of tools. No customer-facing
+messages were requested. Worker deployments still require explicit plugin sync
+and activation on each node; there is no automatic fetch on startup or per turn.
+Existing conversations were not reset. Only Bill was updated.
+
+OpenClaw plugin skills guided package and live-runtime validation; OpenAI Docs
+confirmed the model-instructions-file replacement boundary.
+
+## Prior validation — 2026-09-10
+
+## Frozen bridge validation (current implementation)
+
+- `npm run preflight`: **14 tests pass**, TypeScript/build and package checks pass.
+  Both inspector checks pass with the same two advisory proof gaps (dependency
+  installation and service capture), not live compatibility findings.
+- Real installed-package inspection on Bill returns no diagnostics. Runtime
+  registration remains one service and one CLI; no prompt hook or HTTP relay.
+- The compatibility SHA-256 matches both Bill's original adapter and the published
+  `@openclaw/codex@2026.9.2` npm artifact. Actual-bundle integration checks cover
+  syntax, install/idempotence, foreign-edit refusal, exact restoration and reinstall.
+- Five fresh Responses requests captured on Bill: Astra A, Sol A, unsynced Sol A,
+  Astra B, Sol B. Each has the exact frozen base once, reviewed developer policy
+  once, all 48 approved OpenClaw skills, and no live copies of the three suppressed
+  blocks. Native AGENTS.md, native skills, Default guidance and tool contracts remain.
+- Editing SOUL.md and restarting did not change the frozen prompt. Explicit sync
+  included the temporary marker in both models' new requests. The edit was restored.
+- Sol's tool declarations are byte-identical to the earlier baseline. Astra retains
+  the same tool interfaces; native spawn-agent model descriptions changed with the
+  live catalog (outside this patch).
+- Real Astra canary: code-mode discovery, OpenClaw Gateway exec read, native
+  `spawn_agent`, and native `wait_agent` all executed. The child computed 323 and
+  its recorded base instructions exactly match the compiled parent prompt.
+- Bill's disk restore/re-enroll round trip recovered the exact original adapter,
+  then returned TOML, prompt and enrollment to their pre-test bytes. The running
+  Gateway was not restarted while temporarily restored; this was a disk rollback
+  test, not a claim about restored old-session behavior.
+- Temporary endpoint and SOUL changes were restored. Bill is healthy with no plugin
+  errors; operational model/tool/channel/skill/Gateway settings are unchanged.
+
+The localhost receiver returns synthetic completions: capture tests prove request
+composition, not model obedience. The separate real-provider canary proves the
+specific exercised tools and native-child inheritance, not every fleet workflow.
+Cron preservation and non-target/disabled behavior are source/unit-tested, not
+live multi-customer rollout tests. Existing sessions and future OpenClaw versions
+are not covered. Only Bill was deployed; no npm release or fleet rollout occurred.
+
+The OpenClaw plugin skills guided package/SDK/preflight checks; OpenAI Docs guided
+the model-instructions-file boundary. Private captures and customer files are
+retained outside this repository and are never packaged.
+
+## Earlier base-only validation (historical)
+
+The results below describe the initial base-only plugin, before the frozen bridge.
 
 ## Local
 
