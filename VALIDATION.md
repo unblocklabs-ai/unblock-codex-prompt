@@ -1,5 +1,24 @@
 # Validation
 
+## Published 0.1.0 — 2026-09-12
+
+- Published `@unblocklabs/unblock-codex-prompt@0.1.0` to npm (`latest`) and created
+  GitHub Release `v0.1.0` at `a6b8eccc0b3ea2c6bc48c530c19b7c2484994a89`.
+  CI and the Release workflow passed; the release job verified the npm tarball
+  was identical to its packed artifact. This first local bootstrap has no Actions
+  provenance. The npm trusted publisher now permits this repository's
+  `release.yml`; publishing a future new version through OIDC remains unexercised.
+- Installed the exact npm version on Bill. OpenClaw moved it from the development
+  extensions directory to its managed npm project and removed the old install.
+  A private tar backup retains the previous install. The adapter reference was
+  relinked to the new runtime path without recompiling the frozen agent context.
+- Normal managed Codex routing, frozen context bytes, source hashes, and skill
+  count were preserved. Refresh succeeded for the dev prompt and 12-model catalog;
+  runtime inspection returned no diagnostics and Gateway health passed.
+- A fresh, non-delivering real-provider Sol canary returned the requested
+  acknowledgement. This verifies basic inference through the released package,
+  not general prompt obedience. No other fleet node or Worker was changed.
+
 ## Daily shared Cloudflare prompt refresh — 2026-09-12
 
 - An enrolled `promptUrl` now participates in the daily service, including overdue

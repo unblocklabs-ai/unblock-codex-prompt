@@ -25,13 +25,18 @@ If first-package bootstrapping is needed, an authenticated owner can publish the
 reviewed version once with `npm publish --access public`, then configure trust:
 
 ```sh
-npm trust github @unblocklabs/unblock-codex-prompt --repo unblocklabs-ai/unblock-codex-prompt --file release.yml --yes
+npx --yes --package npm@12.0.2 npm trust github @unblocklabs/unblock-codex-prompt --repo unblocklabs-ai/unblock-codex-prompt --file release.yml --allow-publish --yes
 ```
 
 The Release workflow verifies the registry's tarball integrity against its own
 packed artifact before accepting an already-published version. Different bytes
 fail the job. Subsequent new versions publish through OIDC with provenance; a
 local bootstrap publication does not have GitHub Actions provenance.
+
+Trusted publishing was configured during the 0.1.0 release. The trust-management
+command above uses npm 12 because the current registry requires explicit publish
+permissions; npm 11.13.0's older trust request was rejected. Normal CI publishing
+continues to use the pinned CLI in `release.yml`.
 
 ClawHub publishing is not configured.
 
