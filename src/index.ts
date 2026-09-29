@@ -10,12 +10,14 @@ import { fetchPrompt, REMOTE_POLICY } from "./remote.js";
 import { readOptional } from "./manager.js";
 import { join } from "node:path";
 import { CATALOG_REFRESH_MS, catalogStatus, refreshCatalog, restoreCatalog, startCatalogRefresh } from "./catalog.js";
+import { codexSkillsStatus, refreshCodexSkills, removeCodexSkills } from "./skills.js";
 
 async function refresh(target: Awaited<ReturnType<typeof resolveTarget>>, automatic = false) {
   const failures: unknown[] = [];
   let catalog;
   let prompt;
-  // Attempt both independently, sequentially because they share the enrollment lock.
+  let skills;
+  // Attempt each independently, sequentially because they share the enrollment lock.
   if (target.settings.suppressExplicitDelegationPrompt) {
     try { catalog = await refreshCatalog(target.agentDir, { automatic }); } catch (error) { failures.push(error); }
   }
@@ -23,8 +25,9 @@ async function refresh(target: Awaited<ReturnType<typeof resolveTarget>>, automa
     const url = target.settings.promptUrl;
     try { prompt = await refreshSharedPrompt(target.agentDir, () => fetchPrompt(url)); } catch (error) { failures.push(error); }
   }
+  try { skills = await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills); } catch (error) { failures.push(error); }
   if (failures.length) throw new AggregateError(failures, "Refresh incomplete; failed components retain their installed data");
-  return { catalog, prompt };
+  return { catalog, prompt, skills };
 }
 
 async function resolveTarget(config: OpenClawConfig) {
@@ -80,12 +83,18 @@ export default definePluginEntry({
         const result = await status(ctx.config);
         ctx.logger.info(`${PLUGIN_ID}: ${JSON.stringify(result)}`);
         const target = await resolveTarget(ctx.config);
-        if ((target.settings.suppressExplicitDelegationPrompt || target.settings.promptUrl) && result.enrolled) {
+        if (result.enrolled) {
+          // Remote Codex plugins can add skills at any time; reconcile before app-servers start.
+          try { ctx.logger.info(`${PLUGIN_ID}: codex skills ${JSON.stringify(await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills))}`); }
+          catch (error) { ctx.logger.error(`${PLUGIN_ID}: codex skills not applied: ${error instanceof Error ? error.message : String(error)}`); }
+        }
+        if (result.enrolled) {
           const catalog = await catalogStatus(target.agentDir);
           const remote = "remotePrompt" in result ? result.remotePrompt : null;
           const checkedAt = remote && typeof remote === "object" && "checkedAt" in remote && typeof remote.checkedAt === "number" ? remote.checkedAt : 0;
           const nextAt = Math.min(target.settings.suppressExplicitDelegationPrompt ? catalog.nextRefreshAt ?? 0 : Infinity,
-            target.settings.promptUrl ? checkedAt ? checkedAt + CATALOG_REFRESH_MS : 0 : Infinity);
+            target.settings.promptUrl ? checkedAt ? checkedAt + CATALOG_REFRESH_MS : 0 : Infinity,
+            Date.now() + CATALOG_REFRESH_MS);
           stopCatalogRefresh = startCatalogRefresh(async () => {
             const refreshed = await refresh(target, true);
             ctx.logger.info(`${PLUGIN_ID}: daily refresh ${JSON.stringify(refreshed)}`);
@@ -100,7 +109,8 @@ export default definePluginEntry({
       root.command("status").description("Inspect disk state without writing or claiming live adoption")
         .action(async () => {
           const target = await resolveTarget(config);
-          console.log(JSON.stringify({ ...await status(config), catalog: await catalogStatus(target.agentDir) }, null, 2));
+          console.log(JSON.stringify({ ...await status(config), catalog: await catalogStatus(target.agentDir),
+            codexSkills: await codexSkillsStatus(target.agentDir, target.settings.disabledCodexSkills) }, null, 2));
         });
       root.command("refresh-catalog").description("Fetch fresh provider metadata and repair the managed delegation-policy catalog")
         .action(async () => {
@@ -108,7 +118,7 @@ export default definePluginEntry({
           if (!target.settings.suppressExplicitDelegationPrompt) throw new Error("Enable suppressExplicitDelegationPrompt before refreshing the catalog");
           console.log(JSON.stringify(await refreshCatalog(target.agentDir), null, 2));
         });
-      root.command("refresh").description("Refresh remote prompt and enabled catalog without rereading frozen agent context")
+      root.command("refresh").description("Refresh remote prompt, enabled catalog and codex skills without rereading frozen agent context")
         .action(async () => console.log(JSON.stringify(await refresh(await resolveTarget(config)), null, 2)));
       const sync = root.command("sync").description("Explicitly refresh the prompt snapshot and install the reviewed adapter")
         .option("--adopt", "Take ownership of an existing custom prompt pointer")
@@ -126,12 +136,14 @@ export default definePluginEntry({
         const result = await syncPrompt({ ...target, prompt, ...compiled }, { adopt: options.adopt === true });
         const adapter = plan ? await installAdapter(target.agentDir, plan) : undefined;
         const catalog = target.settings.suppressExplicitDelegationPrompt ? await refreshCatalog(target.agentDir) : undefined;
-        console.log(JSON.stringify({ ...result, adapter, skillCount: compiled?.bundle.skillCount, remotePrompt: remote?.source, catalog }, null, 2));
+        const codexSkills = await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills);
+        console.log(JSON.stringify({ ...result, adapter, skillCount: compiled?.bundle.skillCount, remotePrompt: remote?.source, catalog, codexSkills }, null, 2));
       });
       root.command("restore").description("Restore the original pointer; pause automatic management and retain files")
         .action(async () => {
           const target = await resolveTarget(config);
           await restoreCatalog(target.agentDir);
+          await removeCodexSkills(target.agentDir);
           await restoreAdapter(target.agentDir);
           console.log(JSON.stringify(await restorePrompt({ ...target, prompt: "" }), null, 2));
         });

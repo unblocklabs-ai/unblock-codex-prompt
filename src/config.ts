@@ -1,10 +1,12 @@
 export const PLUGIN_ID = "unblock-codex-prompt";
+// ChatGPT Pages and Pets skills reach Codex through remote plugins and do not apply to OpenClaw agents.
+export const DEFAULT_DISABLED_CODEX_SKILLS = ["pages", "work-pets"];
 
 export function parseConfig(raw: unknown) {
   const value = raw ?? {};
   if (typeof value !== "object" || Array.isArray(value)) throw new Error("Plugin config must be an object");
   for (const key of Object.keys(value)) {
-    if (key !== "agentId" && key !== "agentName" && key !== "frozenContext" && key !== "promptUrl" && key !== "suppressExplicitDelegationPrompt") throw new Error(`Unknown plugin option: ${key}`);
+    if (key !== "agentId" && key !== "agentName" && key !== "frozenContext" && key !== "promptUrl" && key !== "suppressExplicitDelegationPrompt" && key !== "disabledCodexSkills") throw new Error(`Unknown plugin option: ${key}`);
   }
   const agentId = "agentId" in value ? value.agentId : "main";
   const agentName = "agentName" in value ? value.agentName : undefined;
@@ -26,7 +28,12 @@ export function parseConfig(raw: unknown) {
   const suppressExplicitDelegationPrompt = "suppressExplicitDelegationPrompt" in value ? value.suppressExplicitDelegationPrompt : false;
   if (typeof suppressExplicitDelegationPrompt !== "boolean") throw new Error("suppressExplicitDelegationPrompt must be boolean");
   if (suppressExplicitDelegationPrompt && !frozenContext) throw new Error("suppressExplicitDelegationPrompt requires frozenContext");
-  return { agentId, agentName: agentName?.trim(), frozenContext, promptUrl, suppressExplicitDelegationPrompt };
+  const disabledCodexSkills = "disabledCodexSkills" in value ? value.disabledCodexSkills : DEFAULT_DISABLED_CODEX_SKILLS;
+  if (!Array.isArray(disabledCodexSkills) || disabledCodexSkills.length > 64 ||
+      disabledCodexSkills.some(entry => typeof entry !== "string" || !/^[\w.@:-]{1,128}$/u.test(entry)) || new Set(disabledCodexSkills).size !== disabledCodexSkills.length) {
+    throw new Error("disabledCodexSkills must be a list of up to 64 unique skill or plugin names");
+  }
+  return { agentId, agentName: agentName?.trim(), frozenContext, promptUrl, suppressExplicitDelegationPrompt, disabledCodexSkills: disabledCodexSkills as string[] };
 }
 
 export function validatePromptUrl(value: string) {
