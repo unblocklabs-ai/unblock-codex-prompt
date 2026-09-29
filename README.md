@@ -1,7 +1,8 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.1.0.** The frozen bridge is pinned to OpenClaw/Codex plugin 2026.9.2.
+**Version 0.1.1.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
+stable releases with a compatible context-assembly layout.
 
 ## What you control
 
@@ -27,15 +28,18 @@ files use private permissions. Missing identity documents are recorded as absent
 
 ## Compatibility
 
-- Frozen bridge: **OpenClaw 2026.9.2 and @openclaw/codex 2026.9.2 only**. The exact
-  original adapter SHA-256 is checked before patching. Unknown builds are refused.
+- Frozen bridge: **OpenClaw and @openclaw/codex >=2026.9.2**. Reviewed layouts cover
+  2026.9.2 and 2026.9.4, including the newer parent-local context path. Bundle names
+  may change; fingerprints of the context-assembly functions must still match.
+  Changed assembly is refused pending review, rather than patched blindly.
 - Managed local stdio Codex, agent-scoped home, no custom command/arguments.
 - One target agent per installation. Other agents use upstream behavior. Native
   children may inherit the parent's frozen context.
 
 This bridge uses two private upstream seams because public prompt hooks cannot
 fix the dropped-context path: one skill-catalog builder and two entry points in
-one Codex adapter bundle. It is deliberately version-pinned, not upgrade-proof.
+one Codex adapter bundle (plus the parent-local context entry point on newer builds).
+It validates private seams and is not a promise of compatibility with unseen layouts.
 The catalog uses OpenClaw's eligibility, allowlist, visibility and size-limit
 logic. Session-specific and execution-directory skills are not snapshotted.
 Remote-node-only skills are not added; this is for dedicated local Mac agents.
@@ -46,7 +50,7 @@ Remote-node-only skills are not added; this is for dedicated local Mac agents.
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.1.0.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.1.1.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -212,7 +216,7 @@ without restoring leaves the frozen base but re-enables live injections.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.1.0
+npm run release:check -- v0.1.1
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -221,7 +225,8 @@ pointer ownership and foreign edits. See [VALIDATION.md](VALIDATION.md) for live
 proof and limits.
 
 Install with
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.1.0 --accept-capabilities`.
+the packed archive above for an unreleased candidate. After publication, use
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.1.1 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

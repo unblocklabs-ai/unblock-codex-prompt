@@ -3,8 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/plugin-entry";
 import { readOptional, sha256, type FrozenBundle } from "./manager.js";
-
-export const SUPPORTED_OPENCLAW = "2026.9.2";
+import { assertSupportedVersion } from "./compatibility.js";
 
 export async function openclawRoot() {
   let directory = dirname(fileURLToPath(import.meta.resolve("openclaw/plugin-sdk/agent-runtime")));
@@ -13,7 +12,7 @@ export async function openclawRoot() {
     if (source) {
       const pkg: unknown = JSON.parse(source);
       if (pkg && typeof pkg === "object" && "name" in pkg && pkg.name === "openclaw") {
-        if (!("version" in pkg) || pkg.version !== SUPPORTED_OPENCLAW) throw new Error(`Frozen bridge supports OpenClaw ${SUPPORTED_OPENCLAW} only; review upgrades before syncing`);
+        assertSupportedVersion("version" in pkg ? pkg.version : undefined, "OpenClaw");
         return directory;
       }
     }
@@ -23,18 +22,20 @@ export async function openclawRoot() {
   }
 }
 
-// OpenClaw has no public catalog-building SDK. Pin this single internal export,
+// OpenClaw has no public catalog-building SDK. Validate this internal export,
 // retaining its eligibility, agent allowlist, prompt visibility and size limits.
 export async function buildSkillsCatalog(config: OpenClawConfig, agentId: string, workspaceDir: string) {
   const dist = join(await openclawRoot(), "dist");
-  const names = (await readdir(dist)).filter(name => /^workspace-skill-prompt-[\w-]+\.js$/u.test(name));
+  const names = (await readdir(dist)).filter(name => /^workspace-skill-prompt-[\w-]+\.m?js$/u.test(name));
   if (names.length !== 1) throw new Error("Unsupported OpenClaw skills module layout");
   const path = join(dist, names[0]!);
   const source = await readFile(path, "utf8");
-  if (!source.includes("buildSkillSnapshot as t")) throw new Error("Unsupported OpenClaw skills export");
-  const module: { t?: (workspace: string, options: { config: OpenClawConfig; agentId: string }) => unknown } = await import(pathToFileURL(path).href);
-  if (typeof module.t !== "function") throw new Error("Missing OpenClaw skill snapshot builder");
-  const result = module.t(workspaceDir, { config, agentId });
+  const exports = [...source.matchAll(/\bbuildSkillSnapshot as ([\w$]+)\b/gu)];
+  if (exports.length !== 1) throw new Error("Unsupported OpenClaw skills export");
+  const module: Record<string, unknown> = await import(pathToFileURL(path).href);
+  const buildSnapshot = module[exports[0]![1]!];
+  if (typeof buildSnapshot !== "function") throw new Error("Missing OpenClaw skill snapshot builder");
+  const result: unknown = await buildSnapshot(workspaceDir, { config, agentId });
   if (!result || typeof result !== "object" || !("prompt" in result) || typeof result.prompt !== "string" ||
       !("resolvedSkills" in result) || !Array.isArray(result.resolvedSkills)) throw new Error("Unsupported OpenClaw skill snapshot result");
   return { prompt: result.prompt, count: result.resolvedSkills.length };
