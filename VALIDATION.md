@@ -1,5 +1,59 @@
 # Validation
 
+## 0.1.1 candidate and fleet alignment — 2026-09-21
+
+- Removed the exact 2026.9.2 version/bundle-name pin. The bridge now accepts
+  OpenClaw and `@openclaw/codex` stable releases >=2026.9.2 while checking the
+  reviewed context-assembly functions. Unknown changed layouts fail closed.
+  Reviewed actual 2026.9.2 and 2026.9.4 bundles patch successfully and pass
+  `node --check`; the latter includes the separate parent-local context path.
+- `npm run preflight`: **29 tests pass**, both Inspector checks and package check
+  pass. The same two advisory Inspector evidence gaps remain, with zero
+  breakages. `npm run release:check -- v0.1.1` and `git diff --check` pass.
+  Focused tests cover both layouts, default/cron behavior, target isolation,
+  extra/coauthor context, version floor, renamed bundles, exact restore and
+  foreign-edit/path refusal. The package check includes the new version guard.
+- Installed the local 0.1.1 candidate on Rocky only, retaining OpenClaw/Codex
+  2026.9.4. Enrolled prod Fleet Prompt with 42 eligible skills. Installed runtime
+  files match the local build. OpenClaw config differences are confined to this
+  plugin's config; managed Codex TOML adds only `model_instructions_file`.
+- Refreshed/synced all 12 included Codex nodes to shared revision
+  `63846ac122de4df682c0181ebc86223c864aee57e870cec49f1838cc1a13720a`:
+  Bill stays dev; all others use prod. Both live endpoints return HTTP 200 and
+  the matching SHA-256. The master defaults native Codex Computer Use and says
+  to notify Bek about issues. Mika was held without mutations; Bridger excluded.
+- All 12 fresh, non-delivering real-provider canaries returned the requested
+  acknowledgement through the Codex harness, without tool calls or rerouting.
+  Native session records match the complete installed base, contain the updated
+  native AGENTS.md and frozen SOUL, and omit duplicate SOUL/generic OpenClaw
+  developer policy. Theo/Pearl/Rocky initially rejected test-only model/thinking
+  overrides; retrying with their configured defaults passed without policy edits.
+- Final status reports enrolled/ready with matching pointers and installed
+  adapters on all 12. Live schedule log entries exist for 11; James's running
+  service logged a successful automatic daily refresh earlier the same day.
+  Ten required restarts used idle checks and indefinite drain, without session
+  resets; Gateway RPC checks passed. Bill and James required no restart.
+- Trimmed 21 local instruction documents by 9,484 whitespace-delimited words,
+  retaining local identities, customer boundaries and Bek's protected exceptions.
+  Cherry's legacy file was moved into a verified same-host recovery backup.
+  Its old config reference was nested in a project table, not an active top-level
+  pointer; standalone Codex now has the correct top-level managed prompt pointer.
+
+Limits: this proves composition and basic inference, not general policy obedience
+or computer-use operation. Existing conversations were not reset. No elapsed
+24-hour wait or unseen-version compatibility claim is made. Bill's existing
+frozen USER snapshot differs from his current USER.md; the shared-only refresh
+deliberately preserved it. Rocky retains an existing update-history warning about
+the Gateway Node version, despite successful Gateway/inference checks; no Node
+upgrade was included. Source changes remain uncommitted, and 0.1.1 is not published
+to npm/GitHub. Existing 2026.9.2 nodes retained their working bridge installations.
+
+Private per-node evidence, original/proposed documents and recovery paths are in
+`/tmp/fleet-prompt-align-20260921-UXUDCk/REPORT.md`, outside the package. The fleet
+prompt editing skill guided deduplication while preserving exceptions; OpenClaw
+plugin skills guided compatibility/package/lifecycle checks, and OpenAI Docs
+confirmed the top-level instruction-file configuration boundary.
+
 ## Published 0.1.0 — 2026-09-12
 
 - Published `@unblocklabs/unblock-codex-prompt@0.1.0` to npm (`latest`) and created

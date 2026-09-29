@@ -1,6 +1,6 @@
 {
   "name": "@unblocklabs/unblock-codex-prompt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Manage a shared Codex base prompt for an OpenClaw agent.",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,7 +17,7 @@
     "release:check": "node scripts/check-release-version.mjs",
     "prepack": "npm run build"
   },
-  "dependencies": { "toml-eslint-parser": "^1.0.3" },
+  "dependencies": { "acorn": "^8.18.0", "toml-eslint-parser": "^1.0.3" },
   "devDependencies": {
     "@openclaw/plugin-inspector": "^0.3.25",
     "@types/node": "^22.0.0",

@@ -69,7 +69,7 @@ async function status(config: OpenClawConfig) {
 export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Unblock Codex Prompt",
-  description: "Explicitly compile a frozen Codex prompt with a narrow, version-pinned OpenClaw bridge.",
+  description: "Explicitly compile a frozen Codex prompt with a guarded OpenClaw bridge.",
   register(api) {
     let stopCatalogRefresh: (() => Promise<void>) | undefined;
     // Registration/import stays read-only, including plugin inspection and CLI discovery.

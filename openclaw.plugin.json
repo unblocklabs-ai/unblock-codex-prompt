@@ -1,7 +1,7 @@
 {
   "id": "unblock-codex-prompt",
   "name": "Unblock Codex Prompt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Maintain an agent-scoped Codex base prompt and its model_instructions_file pointer.",
   "activation": { "onStartup": true },
   "configSchema": {
@@ -18,7 +18,7 @@
   "uiHints": {
     "agentId": { "label": "OpenClaw agent ID", "help": "Only this agent's managed Codex home is modified. Defaults to main." },
     "agentName": { "label": "Agent name", "help": "Optional name in the shared prompt. Omit for a generic opening." },
-    "frozenContext": { "label": "Frozen context bridge", "help": "Opt in to the reviewed OpenClaw 2026.9.2 adapter. Initial setup requires explicit sync and activation. Local documents and skills stay frozen until another sync." },
+    "frozenContext": { "label": "Frozen context bridge", "help": "Opt in on OpenClaw/Codex >=2026.9.2 with a supported context-assembly layout. Initial setup requires explicit sync and activation. Local documents and skills stay frozen until another sync." },
     "promptUrl": { "label": "Fleet prompt endpoint", "help": "Public HTTPS plain-text endpoint with X-Prompt-Revision SHA-256. After initial sync, refreshed daily and when overdue on startup without refreshing agent context. Requires frozenContext; replaces both bundled policy files." },
     "suppressExplicitDelegationPrompt": { "label": "Suppress conflicting Codex delegation policy", "help": "Manage a model_catalog_json override, refreshed from the configured provider daily and when overdue on startup. Requires frozenContext and an available provider env_key. Generated-file edits are replaced on refresh." }
   }
