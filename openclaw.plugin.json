@@ -12,7 +12,8 @@
       "agentName": { "type": "string", "minLength": 1, "maxLength": 100 },
       "frozenContext": { "type": "boolean", "default": false },
       "promptUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
-      "suppressExplicitDelegationPrompt": { "type": "boolean", "default": false }
+      "suppressExplicitDelegationPrompt": { "type": "boolean", "default": false },
+      "disabledCodexSkills": { "type": "array", "default": ["pages", "work-pets"], "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "pattern": "^[\\w.@:-]{1,128}$" } }
     }
   },
   "uiHints": {
@@ -20,6 +21,7 @@
     "agentName": { "label": "Agent name", "help": "Optional name in the shared prompt. Omit for a generic opening." },
     "frozenContext": { "label": "Frozen context bridge", "help": "Opt in on OpenClaw/Codex >=2026.9.2 with a supported context-assembly layout. Initial setup requires explicit sync and activation. Local documents and skills stay frozen until another sync." },
     "promptUrl": { "label": "Fleet prompt endpoint", "help": "Public HTTPS plain-text endpoint with X-Prompt-Revision SHA-256. After initial sync, refreshed daily and when overdue on startup without refreshing agent context. Requires frozenContext; replaces both bundled policy files." },
-    "suppressExplicitDelegationPrompt": { "label": "Suppress conflicting Codex delegation policy", "help": "Manage a model_catalog_json override, refreshed from the configured provider daily and when overdue on startup. Requires frozenContext and an available provider env_key. Generated-file edits are replaced on refresh." }
+    "suppressExplicitDelegationPrompt": { "label": "Suppress conflicting Codex delegation policy", "help": "Manage a model_catalog_json override, refreshed from the configured provider daily and when overdue on startup. Requires frozenContext and an available provider env_key. Generated-file edits are replaced on refresh." },
+    "disabledCodexSkills": { "label": "Codex skills to remove", "help": "Plugin names (all of their skills) or exact skill names to disable in Codex's native skills list. Defaults to ChatGPT Pages and Pets. Applied through a managed [[skills.config]] block at startup, sync and daily refresh; other skills are untouched. Set [] to stop managing Codex skills." }
   }
 }

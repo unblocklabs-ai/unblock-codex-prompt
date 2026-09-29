@@ -185,6 +185,26 @@ contents without a Gateway restart. Content-only updates report
 are not reset, and their adoption is not guaranteed. The plugin never restarts
 the Gateway automatically; revalidate this behavior when upgrading Codex.
 
+## Codex skills removal
+
+Codex lists every skill it finds in the managed Codex home, including skills from
+ChatGPT remote plugins that sync in on their own. `disabledCodexSkills` names the
+ones to remove: a plugin name removes all of that plugin's skills, and an exact
+skill name (`pages:write-page`, `imagegen`) removes one. It defaults to
+`["pages", "work-pets"]` (ChatGPT Pages and Pets). Other skills are untouched.
+
+```json
+"disabledCodexSkills": ["pages", "work-pets"]
+```
+
+The plugin scans `skills/` and `plugins/cache/` under the managed Codex home and
+writes one marked block of `[[skills.config]] name = "…" enabled = false` rules at
+the end of `config.toml`. It re-applies the block at Gateway startup, `sync`,
+`refresh`, and the daily refresh, so newly synced plugin skills are caught.
+Codex reads the rules when its app-server starts; running sessions keep their
+list until the Gateway or app-server restarts. Set `[]` to remove the block.
+`restore` also removes it. User-authored `[[skills.config]]` entries stay as written.
+
 ## Restore
 
 ```sh
