@@ -1,5 +1,23 @@
 # Validation
 
+## 0.2.0 Codex skills removal — 2026-09-29
+
+- Codex listed 14 native skills on Bill, including four ChatGPT Pages and three
+  Pets skills from remote plugins that sync in on their own. They reached every
+  OpenClaw session (43 of 45 sessions that day carried the skills list).
+- New `disabledCodexSkills` (default `["pages", "work-pets"]`) writes one marked
+  block of `[[skills.config]] name = "…" enabled = false` rules. Codex matches
+  plugin skills as `plugin:skill` by name in 0.153.4, 0.155.0-alpha.9.2 and 0.159.1
+  source. Name rules were verified in a codex 0.159.1 capture lab: folder `path`
+  rules are ignored, `SKILL.md` paths and names work.
+- Against a copy of Bill's real skill/plugin tree and config.toml, discovery named
+  exactly the seven Pages/Pets skills his live list shows; the block parsed with his
+  config and left everything above it byte-identical. Discovery also sees on-disk
+  skills Codex does not load (openai-templates, review-agent); the remove list only
+  writes rules for listed names.
+- `npm run preflight`: 31 tests pass, both Inspector checks pass (same two advisory
+  gaps), package check passes. Live verification follows on Bill before rollout.
+
 ## 0.1.1 candidate and fleet alignment — 2026-09-21
 
 - Removed the exact 2026.9.2 version/bundle-name pin. The bridge now accepts
