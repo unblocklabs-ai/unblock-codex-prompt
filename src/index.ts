@@ -8,7 +8,7 @@ import { buildSkillsCatalog, compilePrompt } from "./compiler.js";
 import { readFrozenPolicy } from "./runtime.js";
 import { fetchPrompt, REMOTE_POLICY } from "./remote.js";
 import { readOptional } from "./manager.js";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { CATALOG_REFRESH_MS, catalogStatus, refreshCatalog, restoreCatalog, startCatalogRefresh } from "./catalog.js";
 import { codexSkillsStatus, refreshCodexSkills, removeCodexSkills } from "./skills.js";
 
@@ -126,7 +126,11 @@ export default definePluginEntry({
       sync.action(async () => {
         const target = await resolveTarget(config);
         const options = sync.opts<{ adopt?: boolean; codexPluginDir?: string }>();
-        const plan = target.settings.frozenContext ? await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir) : null;
+        // Captured import.meta.url paths expire with the CLI. Older hosts expose the
+        // published dist/index.js via source; newer hosts select it via runtimeSource.
+        const source = "runtimeSource" in api && typeof api.runtimeSource === "string" ? api.runtimeSource : api.source;
+        if (target.settings.frozenContext && (!isAbsolute(source) || basename(source) !== "index.js")) throw new Error("Frozen sync requires the packaged plugin runtime entry");
+        const plan = target.settings.frozenContext ? await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir, join(dirname(source), "runtime.js")) : null;
         const remote = target.settings.promptUrl ? await fetchPrompt(target.settings.promptUrl) : null;
         const prompt = remote?.prompt ?? await bundledPrompt(target.settings.agentName);
         const compiled = target.settings.frozenContext ? await compilePrompt(prompt,

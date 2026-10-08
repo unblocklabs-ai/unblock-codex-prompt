@@ -1,7 +1,7 @@
 {
   "id": "unblock-codex-prompt",
   "name": "Unblock Codex Prompt",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Maintain an agent-scoped Codex base prompt and its model_instructions_file pointer.",
   "activation": { "onStartup": true },
   "configSchema": {

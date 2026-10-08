@@ -1,5 +1,50 @@
 # Validation
 
+## 0.2.1 compatibility validation — 2026-10-08
+
+- Retained a clean OpenClaw checkout at `v2026.9.8`
+  (`fc23bc864e4553c2d215e479eeec47b67a0bf943`); the original dirty checkout
+  was left untouched. Runtime validation used the published OpenClaw and
+  `@openclaw/codex` 2026.9.8 packages with Node 24.19.0 in an isolated state,
+  configuration and workspace.
+- The bridge now discovers the split `dist/.setup/thread-lifecycle-*` and
+  `thread-requests-*` bundles, checks the reviewed context carriers, and removes
+  the new thread-level skills append only for the enrolled frozen target.
+  Schema-2 receipts retain exact originals for each patched file; schema-1
+  receipts still restore and migrate on sync. Interrupted upgrades remain
+  recoverable; foreign edits are refused before restore changes any bundle.
+- Adapter runtime imports use the loader's durable `runtimeSource` (or `source`
+  on older hosts), not the temporary execution capture. Real 2026.9.8 CLI sync,
+  restore and resync passed; both restored bundles matched their original bytes.
+  The final packed candidate's installed adapter and entrypoint matched the build.
+- In a separate process after CLI exit, imported the actual patched 2026.9.8
+  bundles and exercised their exported request/context assembly: frozen policy
+  loaded successfully, routing/coauthor text and cron guidance survived, live
+  context/skills were suppressed, and foreign prompt edits failed closed.
+  Actual published 2026.9.2 and 2026.9.4 packages also passed install, syntax,
+  status and exact-byte restore checks.
+- A separate isolated installation pinned both OpenClaw and Codex to 2026.9.3.
+  Real CLI sync succeeded; frozen policy loaded after CLI exit, other-agent
+  behavior remained unchanged, and restore recovered the exact original bytes.
+- Using the actual patched 2026.9.8 thread-request builder and Codex 0.158.0
+  app-server, captured two fresh native threads at a localhost-only Responses
+  receiver with no real credentials. Both requests carried the complete frozen
+  base exactly once, the frozen developer policy and routing/coauthor text, and
+  omitted the separate live skills append. Synthetic responses completed; the
+  isolated provider configuration was restored byte-for-byte afterward.
+- `npm run preflight`: **34 tests pass**, build and both Inspector checks pass,
+  package check passes (29 files). The same two Inspector advisory evidence gaps
+  remain: isolated dependency-install and service-capture proof. The split-layout
+  regression failed on pre-fix code with `Unsupported Codex bundle layout`.
+  `git diff --check` passes.
+
+Limits: this proves real CLI lifetime, packaged request assembly and native
+Responses wire composition, not general policy obedience or the full Gateway
+turn path. No
+operator Gateway, existing sessions, fleet configuration or credentials were
+changed during isolated validation. Publication and fleet activation are separate
+release steps; these checks alone do not establish fleet adoption.
+
 ## 0.2.0 Codex skills removal — 2026-09-29
 
 - Codex listed 14 native skills on Bill, including four ChatGPT Pages and three
