@@ -38,13 +38,11 @@ async function resolveTarget(config: OpenClawConfig) {
   if (appServer !== undefined) {
     if (!appServer || typeof appServer !== "object" || Array.isArray(appServer)) throw new Error("Invalid Codex appServer config");
     if (("transport" in appServer && appServer.transport !== "stdio") ||
-        ("homeScope" in appServer && appServer.homeScope !== "agent") ||
-        ("command" in appServer && appServer.command !== undefined)) {
-      throw new Error("Only OpenClaw-managed, agent-scoped local stdio Codex is supported");
+        ("homeScope" in appServer && appServer.homeScope !== "agent")) {
+      throw new Error("Only agent-scoped local stdio Codex is supported");
     }
-    if ("args" in appServer && appServer.args !== undefined) {
-      throw new Error("Custom Codex appServer.args may override the prompt; remove them or manage the prompt outside this plugin");
-    }
+    // OpenClaw owns launching Codex, including operator-selected binaries/args.
+    // We own this agent's prompt files, not its executable selection.
   }
   return { agentDir: resolveAgentDir(config, settings.agentId), settings, workspaceDir: resolveAgentWorkspaceDir(config, settings.agentId) };
 }

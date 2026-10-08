@@ -1,6 +1,6 @@
 {
   "name": "@unblocklabs/unblock-codex-prompt",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Manage a shared Codex base prompt for an OpenClaw agent.",
   "type": "module",
   "main": "./dist/index.js",
