@@ -94,7 +94,9 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
     if (matches.length !== 1) throw new Error("Unsupported Codex adapter shape: " + name);
     return matches[0]!;
   };
-  if (functions.some(fn => fn.node.id?.name === "buildCodexWorkspaceBootstrapContext")) {
+  // 2026.9.9 has the workspace producer but still uses the legacy carriers.
+  if (!functions.some(fn => fn.node.id?.name === "buildTurnScopedCollaborationInstructions") &&
+      functions.some(fn => fn.node.id?.name === "buildCodexWorkspaceBootstrapContext")) {
     return patchRefreshableAdapter(sources, find, bridgePrefix(agentDir, agentId, runtimePath));
   }
   const developer = find("buildDeveloperInstructions");

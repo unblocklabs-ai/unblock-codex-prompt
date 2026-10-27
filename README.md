@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.2.3.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
+**Version 0.2.4.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
 stable releases with a compatible context-assembly layout.
 
 ## What you control
@@ -29,7 +29,7 @@ files use private permissions. Missing identity documents are recorded as absent
 ## Compatibility
 
 - Frozen bridge: **OpenClaw and @openclaw/codex >=2026.9.2**. Reviewed layouts cover
-  2026.9.2, 2026.9.3, 2026.9.4, 2026.9.8, 2026.10.6 and 2026.10.8, including parent-local context,
+  2026.9.2, 2026.9.3, 2026.9.4, 2026.9.8, 2026.9.9, 2026.10.6 and 2026.10.8, including parent-local context,
   refreshable instructions and split `dist/.setup/` bundles. Bundle names
   may change; fingerprints of the context-assembly functions must still match.
   Changed assembly is refused pending review, rather than patched blindly.
@@ -61,7 +61,7 @@ Remote-node-only skills are not added; this is for dedicated local Mac agents.
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.2.3.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.2.4.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:

@@ -39,9 +39,11 @@ test("frozen documents/catalog refresh only on explicit sync; native files are e
   assert.equal(readFrozenPolicy(agentDir), null);
 });
 
-for (const [layout, assembly] of [["2026.9.2", legacy], ["2026.9.4", modern], ["2026.9.8", null]]) {
+for (const [layout, assembly] of [["2026.9.2", legacy], ["2026.9.4", modern], ["2026.9.8", null], ["2026.9.9", null]]) {
 test(`${layout}: only target policy/context change; cron/default and extra context survive`, () => {
   const sources = assembly === null ? splitAdapterFixture() : [adapterFixture(assembly)];
+  // 9.9 added a workspace producer while retaining the reviewed legacy carriers.
+  if (layout === "2026.9.9") sources.push("async function buildCodexWorkspaceBootstrapContext(params) { return {}; }");
   const patched = patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js");
   assert.throws(() => patchAdapterSources(patched, "/agent", "main", "/plugin/runtime.js"), /shape/);
   assert.throws(() => patchAdapterSources([""], "/agent", "main", "/plugin/runtime.js"), /shape/);
@@ -62,7 +64,7 @@ test(`${layout}: only target policy/context change; cron/default and extra conte
   const developer = contexts.find(context => context.buildDeveloperInstructions);
   const params = { agentId: "main", config: { plugins: { entries: { "unblock-codex-prompt": { enabled: true, config: { frozenContext: true } } } } }, extraSystemPrompt: "ROUTING" };
   const options = { turnScopedDeveloperInstructions: "SOUL", memoryCollaborationInstructions: "MEMORY", skillsCollaborationInstructions: "SKILLS", skillsInstructions: "SKILLS" };
-  const nativeContext = layout === "2026.9.8" ? "SOUL\n\nSKILLS\n\nMEMORY" : "SOUL\n\nMEMORY\n\nSKILLS";
+  const nativeContext = assembly === null ? "SOUL\n\nSKILLS\n\nMEMORY" : "SOUL\n\nMEMORY\n\nSKILLS";
   assert.equal(developer.buildDeveloperInstructions(params), "frozen policy\n\nROUTING");
   assert.equal(developer.buildDeveloperInstructions({ ...params, gitCoauthorPrompt: "COAUTHOR" }), "frozen policy\n\nCOAUTHOR\n\nROUTING");
   assert.equal(context.buildTurnScopedCollaborationInstructions(params, options), "DEFAULT");
@@ -74,7 +76,7 @@ test(`${layout}: only target policy/context change; cron/default and extra conte
     assert.equal(context.buildCodexParentLocalInstructions({ ...params, agentId: "other" }, options), nativeContext);
   }
   const threadOptions = { ...options, appServer: { start: {} }, cwd: "/work", config: { keep: true } };
-  if (layout === "2026.9.8") {
+  if (assembly === null) {
     assert.equal(developer.buildCodexThreadConfiguration(params, threadOptions).developerInstructions, "frozen policy\n\nROUTING");
     assert.equal(developer.buildCodexThreadConfiguration(params, { ...threadOptions, developerInstructions: "HOOK_POLICY" }).developerInstructions, "HOOK_POLICY");
     assert.equal(developer.buildCodexThreadConfiguration({ ...params, agentId: "other" }, threadOptions).developerInstructions, "native policy\n\nSKILLS");
@@ -84,12 +86,12 @@ test(`${layout}: only target policy/context change; cron/default and extra conte
   for (const plugins of [{ enabled: false }, { allow: [] }, { entries: {} }]) {
     const disabled = { ...params, config: { plugins: { ...params.config.plugins, ...plugins } } };
     assert.equal(context.buildTurnScopedCollaborationInstructions(disabled, options), "DEFAULT\n\n" + nativeContext);
-    if (layout === "2026.9.8") assert.equal(developer.buildCodexThreadConfiguration(disabled, threadOptions).developerInstructions, "native policy\n\nSKILLS");
+    if (assembly === null) assert.equal(developer.buildCodexThreadConfiguration(disabled, threadOptions).developerInstructions, "native policy\n\nSKILLS");
   }
   policy = null;
   assert.equal(developer.buildDeveloperInstructions(params), "native policy");
   assert.equal(context.buildTurnScopedCollaborationInstructions(params, options), "DEFAULT\n\n" + nativeContext);
-  if (layout === "2026.9.8") assert.equal(developer.buildCodexThreadConfiguration(params, threadOptions).developerInstructions, "native policy\n\nSKILLS");
+  if (assembly === null) assert.equal(developer.buildCodexThreadConfiguration(params, threadOptions).developerInstructions, "native policy\n\nSKILLS");
 });
 }
 
