@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.2.2.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
+**Version 0.2.3.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
 stable releases with a compatible context-assembly layout.
 
 ## What you control
@@ -29,8 +29,8 @@ files use private permissions. Missing identity documents are recorded as absent
 ## Compatibility
 
 - Frozen bridge: **OpenClaw and @openclaw/codex >=2026.9.2**. Reviewed layouts cover
-  2026.9.2, 2026.9.3, 2026.9.4 and 2026.9.8, including parent-local context and split
-  `dist/.setup/` bundles. Bundle names
+  2026.9.2, 2026.9.3, 2026.9.4, 2026.9.8, 2026.10.6 and 2026.10.8, including parent-local context,
+  refreshable instructions and split `dist/.setup/` bundles. Bundle names
   may change; fingerprints of the context-assembly functions must still match.
   Changed assembly is refused pending review, rather than patched blindly.
 - Local stdio Codex with an OpenClaw agent-scoped home. Operator-selected
@@ -42,8 +42,12 @@ files use private permissions. Missing identity documents are recorded as absent
 
 This bridge uses two private upstream seams because public prompt hooks cannot
 fix the dropped-context path: one skill-catalog builder and guarded Codex context
-carriers. Newer builds also require parent-local suppression and removal of the
-separate thread-level skills append. The installer backs up and tracks every
+carriers. Older builds require parent-local suppression and removal of the
+separate thread-level skills append. The 2026.10.6/2026.10.8 recipe suppresses live
+persona, memory and OpenClaw skills at their producers, so initial threads, reuse,
+parent-local inference and compaction all receive the frozen context. Native
+AGENTS and operational context remain live; cron guidance and execution permissions
+are unchanged. The installer backs up and tracks every
 patched bundle; old single-file receipts remain restorable. Runtime module paths
 come from the loader's selected entry, never its temporary execution capture.
 It validates private seams and is not a promise of compatibility with unseen layouts.
@@ -57,7 +61,7 @@ Remote-node-only skills are not added; this is for dedicated local Mac agents.
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.2.2.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.2.3.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -139,6 +143,14 @@ This guard does not attest to an old thread's retained prompt or detect every
 possible higher-priority Codex config override. An upgrade replacing the adapter
 removes the guard; startup status is diagnostic, not a global inference gate.
 Restore before upgrading, then revalidate compatibility before reenrollment.
+
+If an upgrade already removed the old package generation, do not run restore
+against replacement files or rewrite receipt paths. Verify that every old target
+is absent and each retained original backup matches its receipt hash, privately
+archive the stale receipt, then install the reviewed adapter against the current
+inspected official package. Keep the frozen snapshot and operator-selected launcher intact
+unless a new snapshot was requested. A source update still requires idle activation
+and fresh-session verification; disk status alone does not prove adoption.
 
 ### Daily shared-prompt refresh
 

@@ -1,12 +1,12 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { parse } from "acorn";
+import { parse, type FunctionDeclaration } from "acorn";
 import { readOptional, replaceFile, sha256 } from "./manager.js";
 import { openclawRoot } from "./compiler.js";
 import { assertSupportedVersion, MINIMUM_OPENCLAW } from "./compatibility.js";
 
 const MARKER = "// unblock-codex-prompt bridge v1";
-const BUNDLE_NAME = /^thread-(lifecycle|requests)-[\w-]+\.m?js$/u;
+const BUNDLE_NAME = /^(?:thread-(?:lifecycle|requests|policy)|dynamic-tools|attempt-workspace-context|run-attempt)-[\w-]+\.m?js$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 // Reviewed context carriers, independent of release-specific bundle names.
 const CONTEXT_HASHES = {
@@ -17,6 +17,18 @@ const CONTEXT_HASHES = {
   legacyThread: "703a32a0b18eacd45a9fd3d68c04a13527bdbeaae50a11a6b76768b84b99a9ed",
   thread: "3aa4c414cb449cdb9167e6ed2df9397559176310ce7cff882652bd669ac8cee8",
 };
+// Identical context producers/carriers in the published 2026.10.6 and 2026.10.8 bundles.
+const REFRESHABLE_CONTEXT_HASHES = {
+  buildDeveloperInstructions: "4b4054cdd5ce65358508182d65e71a4c742b2e9debfa51eb65c5b4e26d1eb0bb",
+  buildCodexWorkspaceBootstrapContext: "91bb36eddcf16741957a775af106ab3226ec02dbbe2576b71675ea6db922c0b9",
+  renderCodexSkillsInstructions: "b3b53dccaa80cbd80070f69939909ed7947e5503ab128630a42ed6e255c56039",
+  prepareCodexAttemptContext: "5e38fc7a339ef241acfce3fa1dfae8d06d7f2c4106ee0e511108e680e262a67a",
+  buildCodexParentLocalInstructions: "d68a84359b515949483f5559f3ab4ef6b43f9b5005d5976f5e1559bb9a9f651b",
+  buildCodexThreadConfiguration: "e6994e63d7f408b82ea55a9e9c3e1a87967e13c168d6d72a50a4c16466cca093",
+  refreshCodexThreadInstructions: "23068afa77e3286acc06885b7440d6a1b44ede4c93a6e322fbbbcd6df8fb8777",
+  restoreCodexThreadInstructionsAfterCompaction: "86d6f792175cfbc604f5408016e00b77ed1f7fbefa33b0210d6fbf8d56a2c0a4",
+};
+type AdapterFunction = { node: FunctionDeclaration; bundle: number };
 type AdapterFile = { path: string; originalSha256: string; patchedSha256: string; previousPatchedSha256?: string };
 type Receipt = ({ schema: 1; packageDir: string } & AdapterFile) | { schema: 2; packageDir: string; files: AdapterFile[] };
 function receiptPath(agentDir: string) { return join(agentDir, "codex-home", ".unblock-codex-prompt-adapter.json"); }
@@ -55,6 +67,23 @@ function parseReceipt(source: string | null): Receipt | null {
 }
 export async function readReceipt(agentDir: string) { return parseReceipt(await readOptional(receiptPath(agentDir))); }
 
+function bridgePrefix(agentDir: string, agentId: string, runtimePath: string) {
+  return `${MARKER}
+import { createRequire as unblockPromptCreateRequire } from "node:module";
+const unblockPromptRequire = unblockPromptCreateRequire(import.meta.url);
+function unblockFrozenPolicy(params) {
+  const plugins = params.config?.plugins;
+  const entry = plugins?.entries?.["unblock-codex-prompt"];
+  if (plugins?.enabled === false || entry?.enabled !== true || entry.config?.frozenContext !== true ||
+      (Array.isArray(plugins.allow) && !plugins.allow.includes("unblock-codex-prompt"))) return null;
+  const target = entry.config?.agentId ?? "main";
+  if (params.agentId !== target) return null;
+  if (target !== ${JSON.stringify(agentId)}) throw new Error("Frozen bridge target changed; restore and reinstall the adapter");
+  return unblockPromptRequire(${JSON.stringify(runtimePath)}).readFrozenPolicy(${JSON.stringify(agentDir)});
+}
+`;
+}
+
 export function patchAdapterSources(sources: string[], agentDir: string, agentId: string, runtimePath: string) {
   if (sources.some(source => source.includes(MARKER))) throw new Error("Unsupported Codex adapter shape: already patched");
   const functions = sources.flatMap((source, bundle) =>
@@ -65,6 +94,9 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
     if (matches.length !== 1) throw new Error("Unsupported Codex adapter shape: " + name);
     return matches[0]!;
   };
+  if (functions.some(fn => fn.node.id?.name === "buildCodexWorkspaceBootstrapContext")) {
+    return patchRefreshableAdapter(sources, find, bridgePrefix(agentDir, agentId, runtimePath));
+  }
   const developer = find("buildDeveloperInstructions");
   const collaboration = find("buildTurnScopedCollaborationInstructions");
   const parent = functions.some(fn => fn.node.id?.name === "buildCodexParentLocalInstructions") ? find("buildCodexParentLocalInstructions") : null;
@@ -83,20 +115,7 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
       (parent && (parent.bundle !== collaboration.bundle || ![CONTEXT_HASHES.parent, CONTEXT_HASHES.splitParent].includes(fingerprint(parent)))) ||
       (thread && thread.bundle !== developer.bundle) ||
       (split ? !thread || fingerprint(thread) !== CONTEXT_HASHES.thread : thread !== null && fingerprint(thread) !== CONTEXT_HASHES.legacyThread)) throw new Error("Unsupported Codex context assembly; review the changed upstream functions before syncing");
-  const prefix = `${MARKER}
-import { createRequire as unblockPromptCreateRequire } from "node:module";
-const unblockPromptRequire = unblockPromptCreateRequire(import.meta.url);
-function unblockFrozenPolicy(params) {
-  const plugins = params.config?.plugins;
-  const entry = plugins?.entries?.["unblock-codex-prompt"];
-  if (plugins?.enabled === false || entry?.enabled !== true || entry.config?.frozenContext !== true ||
-      (Array.isArray(plugins.allow) && !plugins.allow.includes("unblock-codex-prompt"))) return null;
-  const target = entry.config?.agentId ?? "main";
-  if (params.agentId !== target) return null;
-  if (target !== ${JSON.stringify(agentId)}) throw new Error("Frozen bridge target changed; restore and reinstall the adapter");
-  return unblockPromptRequire(${JSON.stringify(runtimePath)}).readFrozenPolicy(${JSON.stringify(agentDir)});
-}
-`;
+  const prefix = bridgePrefix(agentDir, agentId, runtimePath);
   const insertions = [
     { fn: developer, text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params.gitCoauthorPrompt, params.extraSystemPrompt].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
     { fn: collaboration, text: '\n\tif (unblockFrozenPolicy(params) !== null) return params.trigger === "cron" ? buildCronCollaborationInstructions() : buildDefaultCollaborationInstructions();' },
@@ -111,6 +130,40 @@ function unblockFrozenPolicy(params) {
       source = source.slice(0, at) + text + source.slice(at);
     }
     return edits.length ? prefix + source : source;
+  });
+}
+
+function patchRefreshableAdapter(sources: string[], find: (name: string) => AdapterFunction, prefix: string) {
+  for (const [name, expected] of Object.entries(REFRESHABLE_CONTEXT_HASHES)) {
+    const { node, bundle } = find(name);
+    if (sha256(sources[bundle]!.slice(node.start, node.end)) !== expected) {
+      throw new Error("Unsupported Codex context assembly: " + name + "; review the changed upstream function before syncing");
+    }
+  }
+  const developer = find("buildDeveloperInstructions");
+  const skills = find("renderCodexSkillsInstructions");
+  const workspace = find("buildCodexWorkspaceBootstrapContext");
+  const originalWorkspace = sources[workspace.bundle]!.slice(workspace.node.start, workspace.node.end)
+    .replace("async function buildCodexWorkspaceBootstrapContext", "async function unblockOriginalWorkspaceContext");
+  // Suppress at the producers: initial, warm, fork, parent-local and post-compaction
+  // carriers all receive the same empty refreshable section. Native AGENTS stays live.
+  const wrapper = `async function buildCodexWorkspaceBootstrapContext(params) {
+  const policy = unblockFrozenPolicy(params.params);
+  const context = await unblockOriginalWorkspaceContext(params);
+  return policy === null ? context : { ...context, personaInstructions: undefined, sharedPersonaInstructions: undefined, memoryInstructions: undefined };
+}
+`;
+  const edits = [
+    { bundle: developer.bundle, start: developer.node.body.start + 1, end: developer.node.body.start + 1,
+      text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params.gitCoauthorPrompt, params.extraSystemPrompt].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
+    { bundle: skills.bundle, start: skills.node.body.start + 1, end: skills.node.body.start + 1,
+      text: '\n\tif (unblockFrozenPolicy(params.attempt) !== null) return;' },
+    { bundle: workspace.bundle, start: workspace.node.start, end: workspace.node.end, text: wrapper + originalWorkspace },
+  ];
+  return sources.map((source, bundle) => {
+    const selected = edits.filter(edit => edit.bundle === bundle).sort((a, b) => b.start - a.start);
+    for (const edit of selected) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+    return selected.length ? prefix + source : source;
   });
 }
 
