@@ -11,6 +11,7 @@ import { assertSupportedVersion } from "../dist/compatibility.js";
 import { legacy, modern, adapterFixture, splitAdapterFixture } from "./fixtures/adapter-contexts.mjs";
 import { syncPrompt, restorePrompt, sha256 } from "../dist/manager.js";
 import { readFrozenPolicy } from "../dist/runtime.js";
+import * as runtime from "../dist/runtime.js";
 
 const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
 
@@ -21,16 +22,16 @@ test("frozen documents/catalog refresh only on explicit sync; native files are e
   await writeFile(join(agentDir, "AGENTS.md"), "NATIVE_ONLY");
   await writeFile(join(agentDir, "MEMORY.md"), "PRIVATE_MEMORY_BODY");
   const catalog = { prompt: "<available_skills><skill>approved</skill></available_skills>", count: 1 };
-  const a = await compilePrompt("base", "policy", agentDir, catalog);
+  const a = await compilePrompt("base", agentDir, catalog);
   assert(!a.prompt.includes("NATIVE_ONLY"));
   assert(!a.prompt.includes("PRIVATE_MEMORY_BODY"));
   assert.match(a.prompt, /Soul A/);
   await syncPrompt({ agentDir, ...a });
-  assert.equal(readFrozenPolicy(agentDir), "policy");
+  assert.equal(readFrozenPolicy(agentDir), "");
   await writeFile(join(agentDir, "SOUL.md"), "Soul B");
   assert.match(await readFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "utf8"), /Soul A/);
-  assert.equal(readFrozenPolicy(agentDir), "policy");
-  const b = await compilePrompt("base", "policy", agentDir, catalog);
+  assert.equal(readFrozenPolicy(agentDir), "");
+  const b = await compilePrompt("base", agentDir, catalog);
   await syncPrompt({ agentDir, ...b });
   assert.match(await readFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "utf8"), /Soul B/);
   await writeFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "foreign edit");
@@ -51,7 +52,7 @@ test(`${layout}: only target policy/context change; cron/default and extra conte
   let policy = "frozen policy";
   const contexts = patched.map(source => {
     const context = vm.createContext({
-      unblockPromptCreateRequire: () => () => ({ readFrozenPolicy: () => policy }),
+      unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => policy }),
       resolveCodexThreadApprovalsReviewer: () => "user",
       codexThreadSandboxOrPermissions: () => ({}),
       buildCodexRuntimeThreadConfigForRun: (_params, config) => config,

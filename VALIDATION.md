@@ -1,5 +1,153 @@
 # Validation
 
+## Remote-only follow-up — 2026-11-01 (unreleased)
+
+This follow-up supersedes the bundled-template and dev-only state described in
+the initial issue-fix validation below.
+
+- Removed the bundled system/developer templates, their loader and identity
+  substitution, and the no-URL/base-only branches. `promptUrl` and
+  `frozenContext: true` are now required in both manifest and runtime validation.
+  The legacy `agentName` key is accepted but ignored so existing fleet configs
+  need no edits. Identity still comes from agent documents.
+- Cloudflare remains the sole shared-policy source. Generated instructions stay
+  in the agent's OpenClaw-managed `codex-home`, not in the plugin package. Daily
+  refresh and hourly error retries remain unchanged. A failed download retains
+  the already-installed agent instructions; there is no packaged fallback.
+- The existing config regression failed before the change because a missing
+  `promptUrl` was accepted, and passed after the remote-only requirement was added.
+  The obsolete template-substitution test was removed along with its sole
+  production caller; configuration coverage remains at the remote boundary.
+- A real Commander CLI test now runs sync, refresh and restore against temporary
+  agent directories and published adapter-function fixtures. It verifies that
+  fetched text (including literal `{{identity}}`) becomes Codex's base, the
+  installed adapter replaces OpenClaw's generic developer policy with empty text
+  while preserving routing additions, refresh leaves frozen identity unchanged,
+  outages retain the installed prompt, and restore recovers original adapter bytes.
+  The HTTP response is synthetic; this is not a live fleet or model-behavior test.
+- Fleet sections 02, 03 and 15 now have identical wording in **dev and prod**:
+  visible progress routing, payload/output verification, and relevant connected
+  lookup before asking the user. Both builds produce revision
+  `ef55c1cdbf840e418fc7640e0ec6e6d2df1ce12feb590768451734c5e90fca54`.
+  Each channel's changed sections grew from **579 to 619 words** in total
+  (lifecycle 426 → 430, tool use 102 → 118, integrations 51 → 71).
+- Final `npm run preflight` passed: TypeScript build, **40 tests**, both Plugin
+  Inspector checks and package validation (**31 files**, no `prompts/` assets).
+  Inspector retains its two previously documented advisory proof gaps, with zero
+  live breakages. Fleet `npm test` passed all **five tests** and rebuilt both
+  channels; the three changed section pairs are byte-identical. Both repositories
+  pass `git diff --check`. The full uncommitted plugin change set, including the
+  preceding issue fixes, is **+225/-66 source/tooling lines**, **+289/-30 test and
+  fixture lines**, and **195 deleted template lines**.
+
+Only the two explicit template files were deleted. Their last uncommitted contents
+were backed up under `/tmp/unblock-prompt-remote-only.TOuVJa/`; committed versions
+are also recoverable through Git. No fleet config, running service, deployed
+Cloudflare channel, or installed agent prompt was changed. OpenClaw plugin,
+fleet-prompt editing and test-audit skills guided compatibility, policy placement,
+and the CLI-level regression boundary.
+
+### Current review map
+
+- Removed: `prompts/system.md`, `prompts/developer.md`.
+- Remote-only selection and compilation: `src/config.ts`, `src/index.ts`,
+  `src/compiler.ts`, `src/remote.ts`.
+- Packaging/config/docs: `package.json`, `openclaw.plugin.json`,
+  `scripts/check-package.mjs`, `README.md`, `RELEASING.md`, `VALIDATION.md`.
+- Native/OpenClaw instruction cleanup: `src/catalog.ts`, `src/context.ts`,
+  `src/adapter.ts`, `src/runtime.ts`, `src/manager.ts`.
+- Refresh error reporting: `src/refresh-error.ts` and `src/index.ts`.
+- Tests: `test/prompt.test.mjs`, `test/remote.test.mjs`, `test/plugin.test.mjs`,
+  `test/bridge.test.mjs`, `test/catalog.test.mjs`,
+  `test/refreshable-adapter.test.mjs`, `test/fixtures/adapter-operational.json`,
+  `test/fixtures/openclaw-additions.json`.
+- Neighboring `fleet-prompt`: `02-task-lifecycle-and-progress.md`,
+  `03-tool-discovery-and-use.md`, `15-apps-mcp-and-integrations.md` under **both**
+  `prompts/dev/sections/` and `prompts/prod/sections/`.
+
+## Initial issues #3–#8 local validation — 2026-11-01 (before remote-only follow-up)
+
+- The catalog, refresh-diagnostics and operational-request regressions were run
+  against an isolated copy of the original `HEAD`. All three failed for their
+  intended reasons: native prose was unchanged, refresh logged only a generic
+  warning, and active-computer context survived request assembly.
+- Plugin preflight passed: TypeScript build, 40 tests, static/runtime Plugin
+  Inspector and package validation (33 files). Inspector still reports the same
+  two advisory evidence gaps for isolated dependency installation and service
+  capture; it reports no live breakages. The fleet dev prompt build and all five
+  distribution tests passed; prod retained revision
+  `eaa6da86e523229f8353dbbefae985ad68d34546fe5b430f17456664b765b97a`.
+- Published `@openclaw/codex` 2026.10.6 and 2026.10.8 have identical bytes for all
+  four new operational seams. The 2026.10.8 package was patched, inspected and
+  restored in an isolated directory; all six modified bundles restored exactly.
+  Existing receipts may safely add newly reviewed bundle targets without losing
+  earlier backups or accepting foreign edits. The lifecycle regression covers
+  this expansion, idempotence, upstream drift and restoration.
+- Request assembly executes unmodified published producers plus the guarded
+  patch, covering automatic and explicit-message/private-final delivery, hidden
+  commentary, no message tool, required targets, sender/account facts, date/timezone,
+  unknown/incognito additions, generic-policy withdrawal and cron's retained
+  parent-local instructions. Execution settings and unrelated-agent output stay
+  unchanged. Known inherited exec defaults disappear; routing overrides remain
+  explicitly Gateway-scoped. Unknown additions are retained.
+- A localhost-only Responses receiver captured actual requests from installed
+  Codex CLI **0.166.0**, using a temporary home, a patched catalog and dummy
+  credentials. Five requests covered a fresh root, an actual full-history native
+  child, child-result delivery to its parent, and root resume. Both roles used the
+  short catalog text with the native direct-call, shared-filesystem, live-limit,
+  wait and fork supplements intact. Native Default-mode prose and explicit-only
+  delegation restrictions were absent; an empty `<collaboration_mode>` marker
+  remained. Compact permissions rendered `network enabled` and retained the
+  escalation-argument constraint. Synthetic responses drove tool execution;
+  no model inference or fleet operation was performed.
+- Refresh service coverage proves that a successful shared-prompt update survives
+  a catalog failure, simultaneous failures identify all three components, hourly
+  retry timing is retained, last-known-good snapshots survive, and credential-like
+  transport errors do not enter logs.
+- Prompt wording was walked through against issue #4's four cases: a relevant
+  connected source, no relevant integration, process success with failed payload,
+  and a successful tool output. It asks for relevant retrieval and result
+  inspection, not exhaustive integration search or mandatory extra file checks.
+  This is a policy review, not a measured model-behavior improvement.
+- Prompt-copy word counts: bundled system **2033 → 2069**, bundled developer
+  **420 → 394**; fleet dev lifecycle **426 → 430**, tool discovery **102 → 118**,
+  integrations **51 → 71**. In the inspected catalog, Default-mode prose fell
+  **124 → 0** words, root role **185 → 6**, child role **195 → 18**. These are
+  wording counts, not a behavior or token-cost benchmark. Production source is
+  **+200/-15 lines**; tests and published-source fixtures are **+204/-9 lines**.
+
+Activation is separate: explicit sync, enabled catalog refresh, idle restart and
+fresh root/child conversations are required. Pre-existing conversations can retain
+deleted context and must not be treated as cleaned. No fleet rollout, live Slack
+send/attachment exercise, commit, push, npm publication or prod prompt promotion
+was performed. Local captures remain outside the repository. OpenClaw plugin,
+fleet-prompt editing and test-audit skills guided the changes; official OpenAI
+documentation confirmed that null collaboration instructions request defaults,
+and source plus actual wire captures established empty-override behavior.
+
+### Initial issue-fix review map (superseded above)
+
+In `unblock-codex-prompt`:
+
+- Prompt copy: `prompts/system.md`, `prompts/developer.md`.
+- Generated native/OpenClaw instructions: `src/catalog.ts`, new `src/context.ts`,
+  `src/remote.ts` (empty remote developer policy).
+- Guarded assembly and empty-policy support: `src/adapter.ts`, `src/runtime.ts`,
+  `src/manager.ts`.
+- Refresh diagnostics: `src/index.ts`, new `src/refresh-error.ts`.
+- Configuration/documentation: `openclaw.plugin.json`, `README.md`, `VALIDATION.md`.
+- Regression coverage: `test/bridge.test.mjs`, `test/catalog.test.mjs`,
+  `test/plugin.test.mjs`, `test/refreshable-adapter.test.mjs`.
+- New published-source fixtures: `test/fixtures/adapter-operational.json`,
+  `test/fixtures/openclaw-additions.json`.
+
+In neighboring `fleet-prompt`, dev only:
+
+- `prompts/dev/sections/02-task-lifecycle-and-progress.md`: visible progress route.
+- `prompts/dev/sections/03-tool-discovery-and-use.md`: payload/output verification.
+- `prompts/dev/sections/15-apps-mcp-and-integrations.md`: relevant connected lookup
+  before asking the user. Prod sections are unchanged.
+
 ## 0.2.1 compatibility validation — 2026-10-08
 
 - Retained a clean OpenClaw checkout at `v2026.9.8`

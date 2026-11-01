@@ -1,26 +1,32 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.2.4.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
+**Version 0.3.0.** The frozen bridge supports OpenClaw/Codex 2026.9.2 and newer
 stable releases with a compatible context-assembly layout.
 
 ## What you control
 
-- Optional `promptUrl`: a shared policy from Fleet Prompt, replacing both bundled
-  policy files below. Agent-specific identity still comes from local documents.
-- `prompts/system.md`: the shared Codex operating contract, with an optional name.
-- `prompts/developer.md`: the reviewed OpenClaw integration policy.
+- Required `promptUrl`: the shared policy compiled from Fleet Prompt's dev/prod
+  sections and served by Cloudflare. It is the only shared-policy source.
 - Each agent's local snapshot of `SOUL.md`, `IDENTITY.md`, `USER.md`, its eligible
   model-visible OpenClaw skills catalog, and a memory reference (not memory bodies).
 
-The snapshot replaces Codex's base instructions through `model_instructions_file`.
-With `frozenContext` enabled, a narrowly patched Codex adapter replaces the generic
-OpenClaw developer policy and suppresses only the soul, memory and OpenClaw-skills
-contributions to collaboration instructions. Default-mode and cron guidance remain.
+The generated instructions replace Codex's base through `model_instructions_file`.
+A narrowly patched Codex adapter also replaces OpenClaw's generic developer
+policy and suppresses the separate soul, memory and OpenClaw-skills
+contributions to collaboration instructions. Cron guidance remains in its existing
+parent-local carrier. The optional managed catalog removes native Default-mode prose.
+
+There are no bundled system/developer templates or base-only mode. Downloaded
+policy and frozen agent context are written only to
+`<agentDir>/codex-home/unblock-codex-prompt.md`, outside the plugin directory.
+Codex reads that generated file; the plugin package does not retain its own copy
+of the downloaded policy.
 
 **Still live and untouched:** native AGENTS.md, native skills, tool schemas and
-executor protocol, sandbox/approvals, native collaboration, channel/time/routing
-context and user messages. `extraSystemPrompt` is retained. This is not total
+executor protocol, sandbox/approvals, native collaboration mechanics, routing
+identifiers, date/timezone and user messages. Reviewed duplicate OpenClaw prose is
+normalized; unknown `extraSystemPrompt` additions, including incognito context, survive. This is not total
 prompt ownership; other plugins/hooks can still add instructions.
 
 Customer documents stay on each agent's machine, outside this package. Snapshot
@@ -47,7 +53,14 @@ separate thread-level skills append. The 2026.10.6/2026.10.8 recipe suppresses l
 persona, memory and OpenClaw skills at their producers, so initial threads, reuse,
 parent-local inference and compaction all receive the frozen context. Native
 AGENTS and operational context remain live; cron guidance and execution permissions
-are unchanged. The installer backs up and tracks every
+are unchanged. On reviewed 2026.10.6/2026.10.8 layouts, the adapter additionally
+removes active-computer context, known Slack participation/style/activation policy,
+duplicate progress-card prose and basic Markdown tutorials. It compacts source
+delivery to current facts and scopes meaningful exec overrides to OpenClaw Gateway
+exec; inherited steady-state defaults are omitted. Unrecognized additions are
+preserved, not removed by heading. Older layouts retain their original per-turn
+operational carriers. Changed operational functions require review before sync.
+The installer backs up and tracks every
 patched bundle; old single-file receipts remain restorable. Runtime module paths
 come from the loader's selected entry, never its temporary execution capture.
 It validates private seams and is not a promise of compatibility with unseen layouts.
@@ -61,7 +74,7 @@ Remote-node-only skills are not added; this is for dedicated local Mac agents.
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.2.4.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.3.0.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -73,7 +86,7 @@ Include the plugin in `plugins.allow` if applicable, then configure:
       "unblock-codex-prompt": {
         enabled: true,
         config: {
-          agentId: "main", agentName: "Bill", frozenContext: true,
+          agentId: "main", frozenContext: true,
           promptUrl: "https://fleet-prompt.unblocklabs.ai/prompt?channel=dev"
         }
       }
@@ -82,25 +95,28 @@ Include the plugin in `plugins.allow` if applicable, then configure:
 }
 ```
 
-`agentId` defaults to `main`; `agentName` is optional. `frozenContext` defaults to
-false for existing base-prompt-only users. No conversation-access hook grant is
-needed. After initial enrollment, `promptUrl` enables daily shared-prompt refresh
+`agentId` defaults to `main`. Both `promptUrl` and `frozenContext: true` are
+required. Legacy `agentName` values remain accepted but are unused; identity comes
+from local agent documents. Existing remote fleet configurations need no changes.
+Configurations without a remote URL or with base-only mode are no longer supported.
+No conversation-access hook grant is needed. Initial enrollment enables daily shared-prompt refresh
 and overdue startup catch-up. Startup never rebuilds local context or patches the
 adapter. The optional model-catalog service can also refresh metadata.
 
-`promptUrl` requires `frozenContext`. Use `channel=dev` for Bill and `channel=prod`
+Use `channel=dev` for Bill and `channel=prod`
 for approved fleet deployments. The URL must use HTTPS without embedded credentials
 or a fragment. Sync fetches without authentication, refuses redirects, and checks
 plain-text content, a 256 KiB limit, UTF-8, and the endpoint's SHA-256
 `X-Prompt-Revision` header, with a ten-second request timeout. These integrity
 checks are not a signature; the configured HTTPS publisher controls the policy.
 
-The remote text replaces the bundled Codex contract; a short developer-layer
-pointer replaces OpenClaw's generic developer policy instead of retaining the old
-`prompts/developer.md` policy copy. The frozen local context is still appended.
+The remote text supplies the shared Codex base; the OpenClaw generic developer
+policy is empty rather than a second shared-policy copy. Empty policy is valid
+only within the normal hash/pointer-validated frozen
+bundle. The frozen local context is still appended.
 No local documents are sent to the Worker. The installed snapshot is the local
-last-known-good copy: a failed fetch aborts sync before writes, never silently
-falls back to a bundled prompt, and does not disrupt normal turns. Status shows
+last-known-good generated file in the agent's managed home: a failed fetch aborts
+sync before writes and does not disrupt normal turns. There is no bundled fallback. Status shows
 the installed URL/revision separately from the configured URL, without fetching.
 
 Back up configuration and drain active work. Inspect the installed official
@@ -125,7 +141,7 @@ openclaw codex-prompt status
 ```
 
 Only explicit `sync` rebuilds local documents, skills, and the adapter policy.
-With `promptUrl`, the daily service fetches the configured Worker channel and
+The daily service fetches the configured Worker channel and
 replaces only the shared prompt prefix when its content changes. The existing
 frozen context is preserved byte-for-byte, without rereading workspace files.
 Editing a source document or restarting does not rebuild that local snapshot.
@@ -136,6 +152,15 @@ frozen. The catalog and its selection are frozen.
 conversations.** Existing native threads may retain earlier base instructions.
 The plugin never interrupts or resets sessions. Capture an actual request after
 provisioning or upgrades; `status` is disk evidence, not live adoption.
+
+For this instruction cleanup, run explicit `sync` to install the new adapter and
+empty remote policy, refresh the enabled catalog, then restart while idle and use
+fresh root/child conversations. Daily prompt refresh alone does not replace a
+snapshot's developer policy or install an adapter. New turns on a newly activated
+conversation stay normalized, but old conversations can retain removed
+active-computer, permission, role or routing text. Do not reuse them to validate
+the cleanup. Warm generic-policy changes explicitly withdraw removed sections;
+they cannot erase unrelated creation-time context.
 
 The patched assembly boundary validates enrollment, pointer and compiled prompt
 hash before replacing/suppressing context. Invalid state aborts assembly.
@@ -183,8 +208,19 @@ endpoint must return a full Codex `models` catalog, not only an OpenAI-style
 `data` list. The managed model cache supplies only the client-version query
 parameter, never the catalog contents.
 
-The plugin preserves upstream model fields and sets only
-`model_messages.multi_agent.mode.explicit` to an empty string on each model. It
+The existing `suppressExplicitDelegationPrompt` opt-in manages these fields on
+each model, preserving unrelated metadata and other permission/mode messages:
+
+- `multi_agent.mode.explicit`: empty, preserving standing useful delegation.
+- `collaboration_modes.default`: empty, leaving runtime mode selection unchanged.
+- `multi_agent.role.root` / `subagent`: compact role identity and child-result delivery.
+  Codex still appends its live executor/shared-state/concurrency/fork guidance.
+- `permissions.danger_full_access`: `Native execution: filesystem unrestricted; network {{ network_access }}.`
+- `approvals.never`: `Approval escalation unavailable; omit sandbox_permissions.`
+
+All paths above are under `model_messages`. Empty catalog strings are intentional
+overrides, not `null` fallback values. The changes affect instruction text, not
+tool definitions, execution settings, approval enforcement or Plan mode. The plugin
 writes `unblock-codex-models.json` in the managed Codex home and sets the top-level
 `model_catalog_json` pointer. It refuses to overwrite another owner's pointer.
 Manual edits to this generated catalog are intentionally replaced on refresh.
@@ -195,7 +231,9 @@ there is no fallback to stale cached metadata. Stopping the service cancels its
 timer and waits for an in-flight refresh. Status exposes last/next refresh times
 and verifies the local catalog hash without fetching. A successful catalog-only
 `refresh-catalog` never changes the fleet prompt or local context snapshot. The
-daily service and `refresh` also check the shared prompt when `promptUrl` is set.
+daily service and `refresh` also check the shared prompt.
+Failures report every failing component, a safe cause and the next hourly retry
+time; transport details, configuration snippets and response bodies are not logged.
 
 Restart the Gateway after first activating the catalog pointer. On the validated
 managed Codex 0.153.4 build, a fresh conversation adopted refreshed catalog
@@ -255,7 +293,7 @@ without restoring leaves the frozen base but re-enables live injections.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.2.1
+npm run release:check -- v0.3.0
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -265,7 +303,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.2.1 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.3.0 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

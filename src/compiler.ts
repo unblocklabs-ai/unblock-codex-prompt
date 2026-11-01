@@ -41,7 +41,7 @@ export async function buildSkillsCatalog(config: OpenClawConfig, agentId: string
   return { prompt: result.prompt, count: result.resolvedSkills.length };
 }
 
-export async function compilePrompt(base: string, policy: string, workspaceDir: string, catalog: { prompt: string; count: number }) {
+export async function compilePrompt(base: string, workspaceDir: string, catalog: { prompt: string; count: number }) {
   const sources: FrozenBundle["sources"] = [];
   const sections = [base.trim(), "## Frozen agent context\nThis context is a local snapshot, refreshed explicitly by the operator. Native AGENTS.md, native skills, actual tool schemas and current session context remain separate. This snapshot does not grant tools or permissions."];
   for (const name of ["SOUL.md", "IDENTITY.md", "USER.md"]) {
@@ -52,5 +52,5 @@ export async function compilePrompt(base: string, policy: string, workspaceDir: 
   sections.push(`## Frozen memory reference\nWhen prior context matters, use the currently available memory tools and follow their schemas. If retrieval is unavailable, say so; do not invent results. The workspace memory reference is ${join(workspaceDir, "MEMORY.md")}. Its contents are not included here. Read it only when the active session's privacy policy permits; do not expose private memory in group or customer conversations.`);
   sources.push({ name: "OpenClaw skills catalog", sha256: sha256(catalog.prompt) });
   sections.push(`## Frozen OpenClaw skills catalog\nThis is the approved agent-workspace catalog at sync time, not a promise that credentials or tools remain available. Session-local skill selection and execution-directory skill discovery do not refresh this snapshot. Use the native catalog separately.\n\n${catalog.prompt.trim() || "No eligible model-visible OpenClaw skills at sync time."}`);
-  return { prompt: `${sections.join("\n\n")}\n`, bundle: { schema: 1 as const, policy: policy.trim(), sources, skillCount: catalog.count, basePromptLength: base.trim().length } };
+  return { prompt: `${sections.join("\n\n")}\n`, bundle: { schema: 1 as const, policy: "", sources, skillCount: catalog.count, basePromptLength: base.trim().length } };
 }

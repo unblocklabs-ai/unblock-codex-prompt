@@ -165,7 +165,7 @@ export async function refreshSharedPrompt(agentDir: string, fetchBase: () => Pro
     const bundle: unknown = JSON.parse(previousBundle ?? "null");
     if (!bundle || typeof bundle !== "object" || !("schema" in bundle) || bundle.schema !== 1 ||
         !("promptSha256" in bundle) || bundle.promptSha256 !== sha256(s.prompt) ||
-        !("policy" in bundle) || typeof bundle.policy !== "string" || !bundle.policy.trim() ||
+        !("policy" in bundle) || typeof bundle.policy !== "string" ||
         !("remotePrompt" in bundle) || !bundle.remotePrompt) {
       throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync");
     }

@@ -71,6 +71,8 @@ function bridgePrefix(agentDir: string, agentId: string, runtimePath: string) {
   return `${MARKER}
 import { createRequire as unblockPromptCreateRequire } from "node:module";
 const unblockPromptRequire = unblockPromptCreateRequire(import.meta.url);
+function unblockNormalizeAdditions(text) { return unblockPromptRequire(${JSON.stringify(runtimePath)}).normalizeOpenClawAdditions(text); }
+function unblockNormalizeTurnContext(context) { return unblockPromptRequire(${JSON.stringify(runtimePath)}).normalizeOpenClawTurnContext(context); }
 function unblockFrozenPolicy(params) {
   const plugins = params.config?.plugins;
   const entry = plugins?.entries?.["unblock-codex-prompt"];
@@ -97,7 +99,8 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
   // 2026.9.9 has the workspace producer but still uses the legacy carriers.
   if (!functions.some(fn => fn.node.id?.name === "buildTurnScopedCollaborationInstructions") &&
       functions.some(fn => fn.node.id?.name === "buildCodexWorkspaceBootstrapContext")) {
-    return patchRefreshableAdapter(sources, find, bridgePrefix(agentDir, agentId, runtimePath));
+    const prefix = bridgePrefix(agentDir, agentId, runtimePath);
+    return patchOperationalAdapter(patchRefreshableAdapter(sources, find, prefix), prefix);
   }
   const developer = find("buildDeveloperInstructions");
   const collaboration = find("buildTurnScopedCollaborationInstructions");
@@ -119,7 +122,7 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
       (split ? !thread || fingerprint(thread) !== CONTEXT_HASHES.thread : thread !== null && fingerprint(thread) !== CONTEXT_HASHES.legacyThread)) throw new Error("Unsupported Codex context assembly; review the changed upstream functions before syncing");
   const prefix = bridgePrefix(agentDir, agentId, runtimePath);
   const insertions = [
-    { fn: developer, text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params.gitCoauthorPrompt, params.extraSystemPrompt].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
+    { fn: developer, text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params.gitCoauthorPrompt, unblockNormalizeAdditions(params.extraSystemPrompt)].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
     { fn: collaboration, text: '\n\tif (unblockFrozenPolicy(params) !== null) return params.trigger === "cron" ? buildCronCollaborationInstructions() : buildDefaultCollaborationInstructions();' },
     ...(parent ? [{ fn: parent, text: '\n\tif (unblockFrozenPolicy(params) !== null) return params.trigger === "cron" ? buildCronCollaborationInstructions() : null;' }] : []),
     // 2026.9.8 moved skills to the start/resume/fork carrier, outside developer policy.
@@ -157,7 +160,7 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
 `;
   const edits = [
     { bundle: developer.bundle, start: developer.node.body.start + 1, end: developer.node.body.start + 1,
-      text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params.gitCoauthorPrompt, params.extraSystemPrompt].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
+      text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params.gitCoauthorPrompt, unblockNormalizeAdditions(params.extraSystemPrompt)].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
     { bundle: skills.bundle, start: skills.node.body.start + 1, end: skills.node.body.start + 1,
       text: '\n\tif (unblockFrozenPolicy(params.attempt) !== null) return;' },
     { bundle: workspace.bundle, start: workspace.node.start, end: workspace.node.end, text: wrapper + originalWorkspace },
@@ -166,6 +169,48 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
     const selected = edits.filter(edit => edit.bundle === bundle).sort((a, b) => b.start - a.start);
     for (const edit of selected) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
     return selected.length ? prefix + source : source;
+  });
+}
+
+const OPERATIONAL_HASHES = {
+  buildTurnStartParams: "166c4d2ca9873f5ced180475487775c2965583aa1ff087e599321fcb408fd053",
+  buildCodexTemporalAdditionalContext: "7b546f0ad79ce26d856f8645bfd5b232f1fdfce699dfe2e84c24fe5f61401094",
+  resumeExistingCodexThread: "1b8d4038ee162b276095d9f3e1ad771f33c7cd794c47fb5088783dae9e7c1494",
+  refreshCodexThreadPolicy: "69d6e9903896c77e71542957dbadddaca5d3cbb4d7cd56b8ff0de2a5ca42b995",
+};
+
+function patchOperationalAdapter(sources: string[], prefix: string) {
+  const functionsByBundle = sources.map(source => parse(source, { ecmaVersion: "latest", sourceType: "module" }).body
+    .filter(node => node.type === "FunctionDeclaration"));
+  const names = functionsByBundle.flat().map(node => node.id?.name);
+  const required = Object.keys(OPERATIONAL_HASHES);
+  if (required.some(name => names.includes(name)) && required.some(name => names.filter(found => found === name).length !== 1)) {
+    throw new Error("Unsupported Codex operational context: missing or duplicate carrier; review before syncing");
+  }
+  return sources.map((source, bundle) => {
+    const functions = functionsByBundle[bundle]!;
+    const edits = [];
+    for (const [name, hash] of Object.entries(OPERATIONAL_HASHES)) {
+      const matches = functions.filter(node => node.id?.name === name);
+      if (!matches.length) continue; // Older carriers have no per-turn additional context.
+      const node = matches[0]!;
+      const original = source.slice(node.start, node.end);
+      if (matches.length !== 1 || sha256(original) !== hash) throw new Error("Unsupported Codex operational context: " + name + "; review before syncing");
+      let replacement: string;
+      if (name === "resumeExistingCodexThread") {
+        replacement = original.replace("await refreshCodexThreadPolicy({", "await refreshCodexThreadPolicy({\n\t\t\tunblockManaged: unblockFrozenPolicy(params.params) !== null,");
+      } else if (name === "refreshCodexThreadPolicy") {
+        replacement = original.replace("{\n", '{\n\tif (params.unblockManaged) {\n\t\tawait injectCodexThreadDeveloperHandoff(params, "Current OpenClaw generic policy replaces all earlier OpenClaw generic policy; removed sections are withdrawn.\\n\\n" + params.developerInstructions);\n\t\treturn;\n\t}\n');
+      } else {
+        const originalName = "unblockOriginal" + name;
+        const value = name === "buildTurnStartParams" ? "result.additionalContext" : "result";
+        const normalized = name === "buildTurnStartParams" ? "{ ...result, additionalContext: unblockNormalizeTurnContext(result.additionalContext) }" : "unblockNormalizeTurnContext(result)";
+        replacement = `function ${name}(params, options) {\n  const managed = unblockFrozenPolicy(params) !== null;\n  const result = ${originalName}(params, options);\n  return managed && ${value} ? ${normalized} : result;\n}\n` + original.replace(`function ${name}(`, `function ${originalName}(`);
+      }
+      edits.push({ start: node.start, end: node.end, text: replacement });
+    }
+    for (const edit of edits.sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+    return edits.length && !source.includes(MARKER) ? prefix + source : source;
   });
 }
 
@@ -203,7 +248,7 @@ export async function prepareAdapter(agentDir: string, agentId: string, supplied
     const patched = patches[index]!;
     return patched === bundle.original ? [] : [{ ...bundle, patched }];
   });
-  if (receipt && (files.length !== receiptFiles(receipt).length || files.some(file => !receiptFiles(receipt).some(previous => previous.path === file.path)))) throw new Error("Codex adapter path changed; restore before changing installations");
+  if (receipt && receiptFiles(receipt).some(previous => !files.some(file => previous.path === file.path))) throw new Error("Codex adapter path changed; restore before changing installations");
   const nextReceipt = { schema: 2 as const, packageDir, files: files.map(file => ({
     path: file.path, originalSha256: sha256(file.original), patchedSha256: sha256(file.patched),
     // Receipt-first upgrades must remain recoverable if source swapping is interrupted.

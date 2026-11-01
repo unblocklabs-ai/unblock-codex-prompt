@@ -1,16 +1,16 @@
-import { readFile } from "node:fs/promises";
 import { listAgentIds, resolveAgentDir, resolveAgentWorkspaceDir } from "openclaw/plugin-sdk/agent-runtime";
 import { definePluginEntry, type OpenClawConfig } from "openclaw/plugin-sdk/plugin-entry";
-import { parseConfig, PLUGIN_ID, renderPrompt } from "./config.js";
+import { parseConfig, PLUGIN_ID } from "./config.js";
 import { promptStatus, restorePrompt, syncPrompt, refreshSharedPrompt } from "./manager.js";
 import { adapterStatus, installAdapter, prepareAdapter, restoreAdapter } from "./adapter.js";
 import { buildSkillsCatalog, compilePrompt } from "./compiler.js";
 import { readFrozenPolicy } from "./runtime.js";
-import { fetchPrompt, REMOTE_POLICY } from "./remote.js";
+import { fetchPrompt } from "./remote.js";
 import { readOptional } from "./manager.js";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { CATALOG_REFRESH_MS, catalogStatus, refreshCatalog, restoreCatalog, startCatalogRefresh } from "./catalog.js";
 import { codexSkillsStatus, refreshCodexSkills, removeCodexSkills } from "./skills.js";
+import { refreshFailure } from "./refresh-error.js";
 
 async function refresh(target: Awaited<ReturnType<typeof resolveTarget>>, automatic = false) {
   const failures: unknown[] = [];
@@ -19,13 +19,10 @@ async function refresh(target: Awaited<ReturnType<typeof resolveTarget>>, automa
   let skills;
   // Attempt each independently, sequentially because they share the enrollment lock.
   if (target.settings.suppressExplicitDelegationPrompt) {
-    try { catalog = await refreshCatalog(target.agentDir, { automatic }); } catch (error) { failures.push(error); }
+    try { catalog = await refreshCatalog(target.agentDir, { automatic }); } catch (error) { failures.push(refreshFailure("catalog", error)); }
   }
-  if (target.settings.promptUrl) {
-    const url = target.settings.promptUrl;
-    try { prompt = await refreshSharedPrompt(target.agentDir, () => fetchPrompt(url)); } catch (error) { failures.push(error); }
-  }
-  try { skills = await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills); } catch (error) { failures.push(error); }
+  try { prompt = await refreshSharedPrompt(target.agentDir, () => fetchPrompt(target.settings.promptUrl)); } catch (error) { failures.push(refreshFailure("shared prompt", error)); }
+  try { skills = await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills); } catch (error) { failures.push(refreshFailure("skills", error)); }
   if (failures.length) throw new AggregateError(failures, "Refresh incomplete; failed components retain their installed data");
   return { catalog, prompt, skills };
 }
@@ -47,19 +44,14 @@ async function resolveTarget(config: OpenClawConfig) {
   return { agentDir: resolveAgentDir(config, settings.agentId), settings, workspaceDir: resolveAgentWorkspaceDir(config, settings.agentId) };
 }
 
-async function bundledPrompt(agentName?: string) {
-  return renderPrompt(await readFile(new URL("../prompts/system.md", import.meta.url), "utf8"), agentName);
-}
-
 async function status(config: OpenClawConfig) {
   const target = await resolveTarget(config);
-  const disk = await promptStatus({ ...target, prompt: target.settings.frozenContext ? "" : await bundledPrompt(target.settings.agentName) });
-  if (!target.settings.frozenContext) return disk;
+  const disk = await promptStatus({ ...target, prompt: "" });
   const adapter = await adapterStatus(target.agentDir);
   let ready = false;
   let error: string | undefined;
-  try { ready = readFrozenPolicy(target.agentDir) !== null; } catch (cause) { error = cause instanceof Error ? cause.message : "Invalid frozen state"; }
-  // A frozen snapshot intentionally differs from today's template/documents.
+  try { ready = disk.enrolled && readFrozenPolicy(target.agentDir) !== null; } catch (cause) { error = cause instanceof Error ? cause.message : "Invalid frozen state"; }
+  // Status inspects installed instructions without fetching or rebuilding them.
   const { promptMatches: _matches, expectedSha256: _expected, ...frozenDisk } = disk;
   const bundle = await readOptional(join(target.agentDir, "codex-home", ".unblock-codex-prompt-bundle.json"));
   const receipt: unknown = bundle ? JSON.parse(bundle) : null;
@@ -88,15 +80,18 @@ export default definePluginEntry({
         }
         if (result.enrolled) {
           const catalog = await catalogStatus(target.agentDir);
-          const remote = "remotePrompt" in result ? result.remotePrompt : null;
+          const remote = result.remotePrompt;
           const checkedAt = remote && typeof remote === "object" && "checkedAt" in remote && typeof remote.checkedAt === "number" ? remote.checkedAt : 0;
           const nextAt = Math.min(target.settings.suppressExplicitDelegationPrompt ? catalog.nextRefreshAt ?? 0 : Infinity,
-            target.settings.promptUrl ? checkedAt ? checkedAt + CATALOG_REFRESH_MS : 0 : Infinity,
+            checkedAt ? checkedAt + CATALOG_REFRESH_MS : 0,
             Date.now() + CATALOG_REFRESH_MS);
           stopCatalogRefresh = startCatalogRefresh(async () => {
             const refreshed = await refresh(target, true);
             ctx.logger.info(`${PLUGIN_ID}: daily refresh ${JSON.stringify(refreshed)}`);
-          }, nextAt, () => ctx.logger.error(`${PLUGIN_ID}: daily refresh incomplete; failed components retain installed data, retrying in one hour`));
+          }, nextAt, (error, retryAt) => {
+            const details = error instanceof AggregateError ? error.errors.map(failure => failure.message).join("; ") : "refresh failed";
+            ctx.logger.error(`${PLUGIN_ID}: daily refresh incomplete: ${details}; failed components retain installed data; retry at ${new Date(retryAt).toISOString()} (in one hour)`);
+          });
           ctx.logger.info(`${PLUGIN_ID}: daily prompt/catalog refresh scheduled`);
         }
       },
@@ -110,7 +105,7 @@ export default definePluginEntry({
           console.log(JSON.stringify({ ...await status(config), catalog: await catalogStatus(target.agentDir),
             codexSkills: await codexSkillsStatus(target.agentDir, target.settings.disabledCodexSkills) }, null, 2));
         });
-      root.command("refresh-catalog").description("Fetch fresh provider metadata and repair the managed delegation-policy catalog")
+      root.command("refresh-catalog").description("Fetch fresh provider metadata and repair the managed instruction catalog")
         .action(async () => {
           const target = await resolveTarget(config);
           if (!target.settings.suppressExplicitDelegationPrompt) throw new Error("Enable suppressExplicitDelegationPrompt before refreshing the catalog");
@@ -127,19 +122,17 @@ export default definePluginEntry({
         // Captured import.meta.url paths expire with the CLI. Older hosts expose the
         // published dist/index.js via source; newer hosts select it via runtimeSource.
         const source = "runtimeSource" in api && typeof api.runtimeSource === "string" ? api.runtimeSource : api.source;
-        if (target.settings.frozenContext && (!isAbsolute(source) || basename(source) !== "index.js")) throw new Error("Frozen sync requires the packaged plugin runtime entry");
-        const plan = target.settings.frozenContext ? await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir, join(dirname(source), "runtime.js")) : null;
-        const remote = target.settings.promptUrl ? await fetchPrompt(target.settings.promptUrl) : null;
-        const prompt = remote?.prompt ?? await bundledPrompt(target.settings.agentName);
-        const compiled = target.settings.frozenContext ? await compilePrompt(prompt,
-          remote ? REMOTE_POLICY : await readFile(new URL("../prompts/developer.md", import.meta.url), "utf8"), target.workspaceDir,
-          await buildSkillsCatalog(config, target.settings.agentId, target.workspaceDir)) : null;
-        if (compiled && remote) Object.assign(compiled.bundle, { remotePrompt: { ...remote.source, checkedAt: Date.now() } });
-        const result = await syncPrompt({ ...target, prompt, ...compiled }, { adopt: options.adopt === true });
-        const adapter = plan ? await installAdapter(target.agentDir, plan) : undefined;
+        if (!isAbsolute(source) || basename(source) !== "index.js") throw new Error("Frozen sync requires the packaged plugin runtime entry");
+        const plan = await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir, join(dirname(source), "runtime.js"));
+        const remote = await fetchPrompt(target.settings.promptUrl);
+        const compiled = await compilePrompt(remote.prompt, target.workspaceDir,
+          await buildSkillsCatalog(config, target.settings.agentId, target.workspaceDir));
+        Object.assign(compiled.bundle, { remotePrompt: { ...remote.source, checkedAt: Date.now() } });
+        const result = await syncPrompt({ ...target, ...compiled }, { adopt: options.adopt === true });
+        const adapter = await installAdapter(target.agentDir, plan);
         const catalog = target.settings.suppressExplicitDelegationPrompt ? await refreshCatalog(target.agentDir) : undefined;
         const codexSkills = await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills);
-        console.log(JSON.stringify({ ...result, adapter, skillCount: compiled?.bundle.skillCount, remotePrompt: remote?.source, catalog, codexSkills }, null, 2));
+        console.log(JSON.stringify({ ...result, adapter, skillCount: compiled.bundle.skillCount, remotePrompt: remote.source, catalog, codexSkills }, null, 2));
       });
       root.command("restore").description("Restore the original pointer; pause automatic management and retain files")
         .action(async () => {

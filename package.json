@@ -1,12 +1,12 @@
 {
   "name": "@unblocklabs/unblock-codex-prompt",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Manage a shared Codex base prompt for an OpenClaw agent.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist/", "prompts/", "openclaw.plugin.json", "README.md", "RELEASING.md", "LICENSE"],
+  "files": ["dist/", "openclaw.plugin.json", "README.md", "RELEASING.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",

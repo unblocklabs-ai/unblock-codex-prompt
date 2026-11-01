@@ -1,16 +1,17 @@
 {
   "id": "unblock-codex-prompt",
   "name": "Unblock Codex Prompt",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Maintain an agent-scoped Codex base prompt and its model_instructions_file pointer.",
   "activation": { "onStartup": true },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
+    "required": ["promptUrl", "frozenContext"],
     "properties": {
       "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "default": "main" },
-      "agentName": { "type": "string", "minLength": 1, "maxLength": 100 },
-      "frozenContext": { "type": "boolean", "default": false },
+      "agentName": { "type": "string", "minLength": 1, "maxLength": 100, "deprecated": true },
+      "frozenContext": { "type": "boolean", "const": true },
       "promptUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
       "suppressExplicitDelegationPrompt": { "type": "boolean", "default": false },
       "disabledCodexSkills": { "type": "array", "default": ["pages", "work-pets"], "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "pattern": "^[\\w.@:-]{1,128}$" } }
@@ -18,10 +19,10 @@
   },
   "uiHints": {
     "agentId": { "label": "OpenClaw agent ID", "help": "Only this agent's managed Codex home is modified. Defaults to main." },
-    "agentName": { "label": "Agent name", "help": "Optional name in the shared prompt. Omit for a generic opening." },
-    "frozenContext": { "label": "Frozen context bridge", "help": "Opt in on OpenClaw/Codex >=2026.9.2 with a supported context-assembly layout. Initial setup requires explicit sync and activation. Local documents and skills stay frozen until another sync." },
-    "promptUrl": { "label": "Fleet prompt endpoint", "help": "Public HTTPS plain-text endpoint with X-Prompt-Revision SHA-256. After initial sync, refreshed daily and when overdue on startup without refreshing agent context. Requires frozenContext; replaces both bundled policy files." },
-    "suppressExplicitDelegationPrompt": { "label": "Suppress conflicting Codex delegation policy", "help": "Manage a model_catalog_json override, refreshed from the configured provider daily and when overdue on startup. Requires frozenContext and an available provider env_key. Generated-file edits are replaced on refresh." },
+    "agentName": { "label": "Legacy agent name (unused)", "help": "Accepted for existing configs only. Identity comes from agent documents; shared prompt text comes only from promptUrl." },
+    "frozenContext": { "label": "Frozen context bridge", "help": "Required: true. Replaces Codex base instructions and OpenClaw generic policy on supported OpenClaw/Codex >=2026.9.2 layouts. Initial setup requires explicit sync and activation. Local documents and skills stay frozen until another sync." },
+    "promptUrl": { "label": "Fleet prompt endpoint", "help": "Required public HTTPS plain-text endpoint with X-Prompt-Revision SHA-256. The only shared-policy source. After initial sync, refreshed daily and when overdue on startup without refreshing agent context. No bundled prompt fallback." },
+    "suppressExplicitDelegationPrompt": { "label": "Compact managed Codex instructions", "help": "Manage a model_catalog_json override: suppress explicit-only delegation and Default-mode prose, trim role introductions and compact full-access/never-approval text. Runtime mechanics and permissions are unchanged. Refreshed daily from the configured provider. Requires frozenContext and an available provider env_key. Generated-file edits are replaced on refresh." },
     "disabledCodexSkills": { "label": "Codex skills to remove", "help": "Plugin names (all of their skills) or exact skill names to disable in Codex's native skills list. Defaults to ChatGPT Pages and Pets. Applied through a managed [[skills.config]] block at startup, sync and daily refresh; other skills are untouched. Set [] to stop managing Codex skills." }
   }
 }

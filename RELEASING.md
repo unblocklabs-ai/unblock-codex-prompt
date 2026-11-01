@@ -44,7 +44,7 @@ ClawHub publishing is not configured.
 
 1. Update `package.json`, `package-lock.json` (including its root package), and
    `openclaw.plugin.json` to the same version.
-2. Review the prompt diff separately from code changes. Render Bill's name and
+2. Review both fleet-prompt dev/prod section diffs separately from plugin code and
    verify a real fresh-session Responses request after meaningful prompt or
    compatibility changes. Keep captures private; publish only sanitized findings.
 3. Run `npm ci`, `npm run preflight`, and `npm run release:check -- vX.Y.Z`.
@@ -66,12 +66,13 @@ Back up the managed Codex TOML privately before temporarily changing the provide
 endpoint. Preserve credentials and unrelated settings, and arrange restoration
 even if the test fails.
 
-Capture template A, make one unmistakable but harmless temporary template change,
-sync, and capture template B in a **different native thread**. Assert the rendered
+Use an isolated prompt endpoint with revision A, then one unmistakable harmless
+marker in revision B. Sync each and capture them in **different native threads**. Assert the rendered
 base prompt appears exactly once (allowing Codex's outer-whitespace trimming),
-the marker changes, and OpenClaw developer guidance still exists separately.
+the marker changes, OpenClaw's generic policy stays replaced, and required runtime
+context remains. Do not edit a bundled template; none exists.
 Inspect both `instructions` and developer text items in `input`: Bill's current
 Codex build carries the base prompt in `input`, not `instructions`. A synthetic receiver
-proves wire composition, not model obedience. Restore the canonical template and
+proves wire composition, not model obedience. Restore the configured prompt URL and
 real endpoint, verify a real model turn, and check Gateway health. Never commit
 the marker, raw captures, local ports/PIDs, private config, or test conversations.

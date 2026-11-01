@@ -3,9 +3,6 @@ import { sha256 } from "./manager.js";
 
 const MAX_BYTES = 256 * 1024;
 
-// The operating policy lives in the downloaded base, not in a second policy copy.
-export const REMOTE_POLICY = "The shared operating instructions and frozen agent context are provided in the base instructions. Current tool schemas, permissions and session routing remain separate.";
-
 /** Explicit sync and daily shared-prompt refresh validate before changing local state. */
 export async function fetchPrompt(url: string, request: typeof fetch = fetch) {
   const response = await request(validatePromptUrl(url), {

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, realpath, writeFile, stat } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../dist/config.js";
-import { fetchPrompt, REMOTE_POLICY } from "../dist/remote.js";
+import { fetchPrompt } from "../dist/remote.js";
 import { compilePrompt } from "../dist/compiler.js";
 import { sha256, syncPrompt, refreshSharedPrompt, restorePrompt } from "../dist/manager.js";
 import { readFrozenPolicy } from "../dist/runtime.js";
@@ -16,8 +16,13 @@ function response(body = text, headers = {}) {
 }
 
 test("remote config requires the bridge and credential-free HTTPS", () => {
-  assert.equal(parseConfig({ frozenContext: true, promptUrl: url }).promptUrl, url);
+  const config = { frozenContext: true, promptUrl: url };
+  assert.deepEqual(parseConfig(config), { agentId: "main", ...config, suppressExplicitDelegationPrompt: false, disabledCodexSkills: ["pages", "work-pets"] });
+  assert.deepEqual(parseConfig({ ...config, agentName: "Bill" }), parseConfig(config));
+  assert.throws(() => parseConfig({ frozenContext: true }), /promptUrl/);
   assert.throws(() => parseConfig({ promptUrl: url }), /frozenContext/);
+  assert.throws(() => parseConfig({ ...config, frozenContext: false }), /frozenContext/);
+  for (const invalid of [{ ...config, agentId: "../main" }, { ...config, extra: true }]) assert.throws(() => parseConfig(invalid));
   for (const promptUrl of [7, "http://localhost/prompt", "https://user:secret@example.com/prompt", `${url}#fragment`]) {
     assert.throws(() => parseConfig({ frozenContext: true, promptUrl }));
   }
@@ -26,7 +31,7 @@ test("remote config requires the bridge and credential-free HTTPS", () => {
 async function enrolledRemote() {
   const agentDir = await mkdtemp(join(await realpath(tmpdir()), "shared-refresh-"));
   await writeFile(join(agentDir, "SOUL.md"), "Frozen soul");
-  const compiled = await compilePrompt(text, REMOTE_POLICY, agentDir, { prompt: "Frozen skills", count: 1 });
+  const compiled = await compilePrompt(text, agentDir, { prompt: "Frozen skills", count: 1 });
   compiled.bundle.remotePrompt = { url, revision: sha256(text) };
   await syncPrompt({ agentDir, ...compiled });
   const home = join(agentDir, "codex-home");
@@ -45,7 +50,7 @@ test("shared refresh changes only the prefix, preserves frozen context, and leav
   assert.deepEqual(bundle.sources, f.compiled.bundle.sources);
   assert.equal(bundle.skillCount, 1);
   assert.equal(bundle.remotePrompt.checkedAt, 1000);
-  assert.equal(readFrozenPolicy(f.agentDir), REMOTE_POLICY);
+  assert.equal(readFrozenPolicy(f.agentDir), "");
   const before = await stat(f.path);
   assert.equal((await refreshSharedPrompt(f.agentDir, fetchBase, 2000)).changed, false);
   assert.equal((await stat(f.path)).ino, before.ino);
@@ -116,16 +121,16 @@ test("remote snapshot is cached locally; failed fetch cannot replace it with a b
   const home = join(agentDir, "codex-home");
   await mkdir(home);
   const remote = await fetchPrompt(url, async () => response());
-  const compiled = await compilePrompt(remote.prompt, REMOTE_POLICY, agentDir, { prompt: "", count: 0 });
+  const compiled = await compilePrompt(remote.prompt, agentDir, { prompt: "", count: 0 });
   compiled.bundle.remotePrompt = remote.source;
   await syncPrompt({ agentDir, ...compiled });
   const path = join(home, "unblock-codex-prompt.md");
   const before = await readFile(path, "utf8");
   assert(before.startsWith(text.trim()));
-  assert.equal(readFrozenPolicy(agentDir), REMOTE_POLICY);
+  assert.equal(readFrozenPolicy(agentDir), "");
   assert.deepEqual(JSON.parse(await readFile(join(home, ".unblock-codex-prompt-bundle.json"), "utf8")).remotePrompt, remote.source);
   await assert.rejects(fetchPrompt(url, async () => { throw new Error("offline"); }), /offline/);
   assert.equal(await readFile(path, "utf8"), before);
-  assert.equal(readFrozenPolicy(agentDir), REMOTE_POLICY);
+  assert.equal(readFrozenPolicy(agentDir), "");
   assert.equal((await syncPrompt({ agentDir, ...compiled })).changed, false);
 });

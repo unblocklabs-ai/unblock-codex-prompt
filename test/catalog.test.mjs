@@ -16,13 +16,26 @@ async function fixture() {
   return { agentDir, home };
 }
 
-test("catalog patch changes only the explicit mode field, preserving all other metadata", () => {
+test("catalog cleanup preserves unrelated modes, permission policies and model metadata", () => {
   const expected = structuredClone(catalog);
-  expected.models[0].model_messages.multi_agent.mode.explicit = "";
+  const messages = expected.models[0].model_messages;
+  messages.multi_agent.mode.explicit = "";
+  messages.multi_agent.role = { root: "You are `/root`, the primary agent.", subagent: "You are a child agent. Your final response is delivered to your parent. Your task address identifies you." };
+  messages.collaboration_modes = { default: "" };
+  messages.permissions = { danger_full_access: "Native execution: filesystem unrestricted; network {{ network_access }}." };
+  messages.approvals = { never: "Approval escalation unavailable; omit sandbox_permissions." };
   assert.deepEqual(patchCatalog(catalog), expected);
   assert.equal(catalog.models[0].model_messages.multi_agent.mode.explicit, "restrictive");
   assert.equal(patchCatalog({ models: [{ ...catalog.models[0], model_messages: null }] }).models[0].model_messages.multi_agent.mode.explicit, "");
-  for (const invalid of [{ models: [] }, { data: [] }, { models: [catalog.models[0], catalog.models[0]] }, { models: [{ slug: "missing" }] }]) assert.throws(() => patchCatalog(invalid));
+  const enriched = structuredClone(catalog);
+  Object.assign(enriched.models[0].model_messages, { collaboration_modes: { plan: "PLAN" }, permissions: { workspace_write: "WRITE", read_only: "READ" }, approvals: { on_request: "ASK", unless_trusted: "TRUST" } });
+  const patched = patchCatalog(enriched).models[0].model_messages;
+  assert.equal(patched.collaboration_modes.plan, "PLAN");
+  assert.equal(patched.permissions.workspace_write, "WRITE");
+  assert.equal(patched.permissions.read_only, "READ");
+  assert.equal(patched.approvals.on_request, "ASK");
+  assert.equal(patched.approvals.unless_trusted, "TRUST");
+  for (const invalid of [{ models: [] }, { data: [] }, { models: [catalog.models[0], catalog.models[0]] }, { models: [{ slug: "missing" }] }, { models: [{ ...catalog.models[0], model_messages: { permissions: "invalid" } }] }]) assert.throws(() => patchCatalog(invalid));
 });
 
 test("refresh overwrites manual generated-file edits from fresh source; failure retains the last good copy", async () => {
@@ -85,13 +98,15 @@ test("source fetch uses provider auth and client version, never the generated ov
 test("daily timer catches up on startup, retries failures hourly and stops cleanly", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 10_000 });
   let calls = 0;
-  let errors = 0;
-  const stop = startCatalogRefresh(async () => { calls++; if (calls === 2) throw new Error("offline"); }, 0, () => errors++);
+  const errors = [];
+  const failure = new Error("offline");
+  const stop = startCatalogRefresh(async () => { calls++; if (calls === 2) throw failure; }, 0, (error, retryAt) => errors.push({ error, retryAt }));
   const flush = () => new Promise(setImmediate);
   t.mock.timers.tick(0); await flush();
   assert.equal(calls, 1);
   t.mock.timers.tick(CATALOG_REFRESH_MS - 1); await flush(); assert.equal(calls, 1);
-  t.mock.timers.tick(1); await flush(); assert.equal(calls, 2); assert.equal(errors, 1);
+  t.mock.timers.tick(1); await flush(); assert.equal(calls, 2);
+  assert.deepEqual(errors, [{ error: failure, retryAt: Date.now() + 60 * 60 * 1000 }]);
   t.mock.timers.tick(60 * 60 * 1000); await flush(); assert.equal(calls, 3);
   await stop(); t.mock.timers.tick(CATALOG_REFRESH_MS); await flush(); assert.equal(calls, 3);
 });

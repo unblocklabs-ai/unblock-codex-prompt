@@ -41,7 +41,20 @@ export function patchCatalog(value: unknown) {
     if (!record(multi)) throw new Error("Invalid multi_agent metadata");
     const mode = multi.mode ?? {};
     if (!record(mode)) throw new Error("Invalid multi_agent mode metadata");
-    return { ...model, model_messages: { ...messages, multi_agent: { ...multi, mode: { ...mode, explicit: "" } } } };
+    const role = multi.role ?? {};
+    const collaboration = messages.collaboration_modes ?? {};
+    const permissions = messages.permissions ?? {};
+    const approvals = messages.approvals ?? {};
+    if (![role, collaboration, permissions, approvals].every(record)) throw new Error("Invalid model message metadata");
+    return { ...model, model_messages: { ...messages,
+      collaboration_modes: { ...collaboration, default: "" },
+      multi_agent: { ...multi, mode: { ...mode, explicit: "" }, role: { ...role,
+        root: "You are `/root`, the primary agent.",
+        subagent: "You are a child agent. Your final response is delivered to your parent. Your task address identifies you.",
+      } },
+      permissions: { ...permissions, danger_full_access: "Native execution: filesystem unrestricted; network {{ network_access }}." },
+      approvals: { ...approvals, never: "Approval escalation unavailable; omit sandbox_permissions." },
+    } };
   });
   return { ...value, models };
 }
@@ -135,7 +148,7 @@ export async function restoreCatalog(agentDir: string) {
 }
 
 /** Start promptly if overdue, persist successful refresh time, retry failures hourly. */
-export function startCatalogRefresh(run: () => Promise<void>, nextAt: number, onError: () => void) {
+export function startCatalogRefresh(run: () => Promise<void>, nextAt: number, onError: (error: unknown, retryAt: number) => void) {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout>;
   let pending: Promise<void> | undefined;
@@ -143,7 +156,7 @@ export function startCatalogRefresh(run: () => Promise<void>, nextAt: number, on
     timer = setTimeout(() => {
       pending = (async () => {
         let next = CATALOG_REFRESH_MS;
-        try { await run(); } catch { onError(); next = 60 * 60 * 1000; }
+        try { await run(); } catch (error) { next = 60 * 60 * 1000; onError(error, Date.now() + next); }
         if (!stopped) schedule(next);
       })();
     }, Math.max(0, delay));
