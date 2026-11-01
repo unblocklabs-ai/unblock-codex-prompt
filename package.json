@@ -40,5 +40,9 @@
   "keywords": ["openclaw", "openclaw-plugin", "codex", "prompt"],
   "repository": { "type": "git", "url": "git+https://github.com/unblocklabs-ai/unblock-codex-prompt.git" },
   "bugs": { "url": "https://github.com/unblocklabs-ai/unblock-codex-prompt/issues" },
-  "homepage": "https://github.com/unblocklabs-ai/unblock-codex-prompt#readme"
+  "homepage": "https://github.com/unblocklabs-ai/unblock-codex-prompt#readme",
+  "overrides": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "hono": "4.13.11"
+  }
 }
