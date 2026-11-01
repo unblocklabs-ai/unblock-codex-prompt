@@ -5,27 +5,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { patchAdapterSources, prepareAdapter, installAdapter, restoreAdapter, adapterStatus } from "../dist/adapter.js";
+import { patchAdapterSources, prepareAdapter, installAdapter, planAdapterRestore, applyAdapterRestore, adapterStatus } from "../dist/adapter.js";
+const restoreAdapter = async agentDir => applyAdapterRestore(await planAdapterRestore(agentDir));
 import * as runtime from "../dist/runtime.js";
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8"));
 const sources = Object.values(fixture.bundles);
 const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
 
-test("refreshable layout freezes producers across thread creation, reuse, parent-local inference and compaction", async () => {
+test("refreshable layout delivers the live skills catalog and persona in thread developer instructions; memory stays suppressed across creation, reuse, parent-local inference and compaction", async () => {
   const patched = patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js");
-  let policy = "FROZEN POLICY";
+  // Skills are renamed and wrapped, not suppressed; one relay key replaces the persona carrier.
+  assert.equal(patched.filter(source => source.includes("function unblockOriginalSkillsInstructions(")).length, 1);
+  assert.equal(patched.some(source => source.includes("unblock-codex-prompt.persona")), false);
+  let policy = "";
+  let olderRuntime = false;
   let liveTag = "A";
+  let harnessContext = true;
   const handoffs = [];
   const globals = {
     unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => {
       if (policy instanceof Error) throw policy;
       return policy;
-    } }),
+    }, readCodexBaseInstructions: olderRuntime ? undefined : () => `FLEET BASE ${liveTag}` }),
     joinPresentSections: (...parts) => parts.filter(part => part?.trim()).join("\n\n"),
     flattenCodexDynamicToolFunctions: specs => specs.flatMap(spec => spec.tools ?? [spec]),
     normalizeLowercaseStringOrEmpty: value => value?.toLowerCase() ?? "",
-    shouldIncludeAgentHarnessRuntimeContext: () => true,
+    shouldIncludeAgentHarnessRuntimeContext: () => harnessContext,
     isMessageOnlyCodexSourceReply: () => false,
     resolveAgentWorkspaceMemoryRouting: () => ({ memoryToolNames: ["memory_search"], memoryToolRouted: true }),
     prepareAgentWorkspaceContext: async () => ({
@@ -59,11 +65,12 @@ test("refreshable layout freezes producers across thread creation, reuse, parent
   });
   const owner = name => contexts.find(context => typeof context[name] === "function");
   const params = { agentId: "main", disableTools: true, extraSystemPrompt: "ROUTING", gitCoauthorPrompt: "COAUTHOR", config: { plugins: { entries: { "unblock-codex-prompt": { enabled: true, config: { frozenContext: true } } } } } };
-  const render = async attempt => {
+  // The reviewed prepareCodexAttemptContext order: workspace context, skills, then the thread request.
+  const render = async (attempt, { dynamicTools = [], skillsPrompt = `LIVE SKILLS ${liveTag}` } = {}) => {
     const workspace = await owner("buildCodexWorkspaceBootstrapContext").buildCodexWorkspaceBootstrapContext({
-      params: attempt, resolvedWorkspace: "/workspace", executionWorkspace: "/project", effectiveWorkspace: "/project", sessionAgentId: "main", tools: [],
+      params: attempt, resolvedWorkspace: "/workspace", executionWorkspace: "/project", effectiveWorkspace: "/project", sessionAgentId: "main", tools: dynamicTools,
     });
-    const skills = owner("renderCodexSkillsInstructions").renderCodexSkillsInstructions({ attempt, skillsPrompt: `LIVE SKILLS ${liveTag}`, dynamicTools: [] });
+    const skills = owner("renderCodexSkillsInstructions").renderCodexSkillsInstructions({ attempt, skillsPrompt, dynamicTools });
     const refreshable = globals.joinPresentSections(skills, workspace.sharedPersonaInstructions, workspace.memoryInstructions) || undefined;
     const request = owner("buildCodexThreadConfiguration").buildCodexThreadConfiguration(attempt, {
       config: { keep: true }, cwd: "/project", appServer: { start: {}, approvalPolicy: "never" }, refreshableInstructions: refreshable,
@@ -74,7 +81,13 @@ test("refreshable layout freezes producers across thread creation, reuse, parent
     return { workspace, refreshable, request, parent };
   };
   const initial = await render(params);
-  assert.equal(initial.request.developerInstructions, "FROZEN POLICY\n\nCOAUTHOR\n\nROUTING");
+  // Exactly upstream's skills rendering, then the persona, then the retained additions.
+  assert.equal(initial.request.developerInstructions, "## OpenClaw Skills\nLIVE SKILLS A\n\nLIVE PERSONA A\n\nCOAUTHOR\n\nROUTING");
+  assert.equal(initial.request.baseInstructions, "FLEET BASE A");
+  // The relay is non-enumerable: request fingerprints and serialized params do not see it.
+  assert.equal(JSON.stringify(params).includes("LIVE"), false);
+  assert.deepEqual(Object.getOwnPropertySymbols(params).map(String), ["Symbol(unblock-codex-prompt.live-context)"]);
+  // Skills are in neither the refreshable nor the parent-local carrier.
   assert.equal(initial.refreshable, undefined);
   assert.equal(initial.parent, null);
   assert.equal(initial.workspace.threadDeveloperInstructions, "NATIVE AGENTS");
@@ -91,6 +104,11 @@ test("refreshable layout freezes producers across thread creation, reuse, parent
 
   liveTag = "B";
   const reused = await render(params);
+  // Catalog changes, persona edits and policy refreshes reach the next turn's thread request (a change re-syncs the thread).
+  assert.equal(reused.request.developerInstructions, "## OpenClaw Skills\nLIVE SKILLS B\n\nLIVE PERSONA B\n\nCOAUTHOR\n\nROUTING");
+  assert.equal(reused.request.baseInstructions, "FLEET BASE B");
+  assert.equal(reused.refreshable, undefined);
+  assert.equal(reused.parent, null);
   await owner("refreshCodexThreadInstructions").refreshCodexThreadInstructions({ refreshableInstructions: reused.refreshable });
   assert.match(handoffs.at(-1), /earlier OpenClaw-supplied skills, persona, and memory instructions are withdrawn/);
   const count = handoffs.length;
@@ -103,11 +121,50 @@ test("refreshable layout freezes producers across thread creation, reuse, parent
     assert.match(ordinary.refreshable, /LIVE PERSONA B/);
     assert.match(ordinary.refreshable, /LIVE SKILLS B/);
     assert.match(ordinary.refreshable, /LIVE MEMORY B/);
-    assert.match(ordinary.parent, /LIVE/);
+    assert.match(ordinary.parent, /LIVE PERSONA B[^]*LIVE SKILLS B/);
     assert.match(ordinary.request.developerInstructions, /NATIVE CREDENTIAL GUIDANCE/);
+    // Upstream appends its own refreshable section; nothing is relayed ahead of the native policy.
+    assert.match(ordinary.request.developerInstructions, /^You are a personal agent running inside OpenClaw\./);
+    assert.equal(ordinary.request.developerInstructions.split("LIVE SKILLS B").length, 2);
+    assert.equal("baseInstructions" in ordinary.request, false);
   }
+  // A plugin rollback without restore leaves this patch calling an older runtime: Codex then
+  // reads the policy from model_instructions_file instead of failing the turn.
+  olderRuntime = true;
+  const rolledBack = await render(params);
+  assert.equal("baseInstructions" in rolledBack.request, false);
+  // The relay is inline in the patch, so the live catalog survives the rollback too.
+  assert.equal(rolledBack.request.developerInstructions, "## OpenClaw Skills\nLIVE SKILLS B\n\nLIVE PERSONA B\n\nCOAUTHOR\n\nROUTING");
+  olderRuntime = false;
   policy = null;
-  assert.match((await render(params)).refreshable, /LIVE PERSONA B/);
+  const paused = await render(params);
+  assert.match(paused.refreshable, /LIVE SKILLS B[^]*LIVE PERSONA B/);
+  assert.match(paused.request.developerInstructions, /^You are a personal agent running inside OpenClaw\./);
+  policy = "";
+
+  // A run without harness runtime context gets no skills (nor persona) from upstream, so none are relayed.
+  harnessContext = false;
+  const noHarness = await render({ ...params });
+  assert.equal(noHarness.request.developerInstructions, "COAUTHOR\n\nROUTING");
+  assert.equal(noHarness.refreshable, undefined);
+  harnessContext = true;
+  // Upstream's skills_search/skills_read hints pass through unchanged, with or without a prompt.
+  const tools = [{ name: "skills_search" }, { name: "skills_read" }];
+  const hinted = await render({ ...params }, { dynamicTools: tools });
+  assert.equal(hinted.request.developerInstructions, ["## OpenClaw Skills",
+    "The directory is bounded. Use OpenClaw's skills_search tool to find relevant installed skills omitted from it. Search does not install skills.",
+    "Use OpenClaw's skills_read tool with an exact name for complete instructions; a known name does not require search first.",
+    "LIVE SKILLS B"].join("\n") + "\n\nLIVE PERSONA B\n\nCOAUTHOR\n\nROUTING");
+  const searchOnly = await render({ ...params }, { dynamicTools: [{ name: "skills_search" }], skillsPrompt: "" });
+  assert.match(searchOnly.request.developerInstructions, /^## OpenClaw Skills\nThe directory is bounded\. Use OpenClaw's skills_search tool[^\n]*\n\nLIVE PERSONA B/);
+  assert.equal((await render({ ...params }, { skillsPrompt: "" })).request.developerInstructions, "LIVE PERSONA B\n\nCOAUTHOR\n\nROUTING");
+  // A copy of the params (paths that never assembled this attempt's context) carries no live context.
+  const assembled = { ...params };
+  await render(assembled);
+  const copy = owner("buildCodexThreadConfiguration").buildCodexThreadConfiguration({ ...assembled }, { config: {}, cwd: "/project", appServer: { start: {}, approvalPolicy: "never" } });
+  assert.equal(copy.developerInstructions, "COAUTHOR\n\nROUTING");
+  assert.equal(owner("buildDeveloperInstructions").buildDeveloperInstructions({ ...assembled }), "COAUTHOR\n\nROUTING");
+
   policy = new Error("Frozen prompt changed outside sync");
   await assert.rejects(render(params), /Frozen prompt changed outside sync/);
 });
@@ -246,4 +303,51 @@ test("refreshable bundles install idempotently, reject upstream/foreign changes 
     const changed = sources.map(source => source.replace(`function ${name}(`, `function ${name}(/* changed upstream */`));
     assert.throws(() => patchAdapterSources(changed, agentDir, "main", runtimePath), /Unsupported Codex context assembly/);
   }
+});
+
+test("managed Codex delivers the live skills catalog and the full host persona, personal overlay included, in instructions native children inherit", async () => {
+  const patched = patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js");
+  const intro = "OpenClaw loaded these workspace instruction files from the active agent workspace. HOST PERSONAL RULE";
+  const personaFiles = [{ path: "/workspace/SOUL.md", content: "LIVE SHARED SOUL" }, { path: "/workspace/users/p1/USER.md", content: "LIVE PERSONAL", personalUser: true }];
+  const render = files => ["## OpenClaw Agent Soul", "", intro, "", "<AGENT_SOUL>", "", ...files.flatMap(file => [`### ${file.path}`, "", file.content, ""]), "</AGENT_SOUL>"].join("\n").trim();
+  const owner = (name) => patched.find(source => source.includes(`function ${name}(`));
+  const globals = {
+    unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => "FLEET" }),
+    flattenCodexDynamicToolFunctions: () => [], normalizeLowercaseStringOrEmpty: value => value?.toLowerCase() ?? "",
+    shouldIncludeAgentHarnessRuntimeContext: () => true, isMessageOnlyCodexSourceReply: () => false,
+    resolveAgentWorkspaceMemoryRouting: () => ({ memoryToolNames: [], memoryToolRouted: false }),
+    prepareAgentWorkspaceContext: async () => ({ bootstrapFiles: [], contextFiles: [], promptContextFiles: [], memoryReferenceFiles: [], memoryToolRoutedBootstrapFiles: [],
+      personaFiles, instructionSnapshot: { files: [], instructions: "" }, personaInstructions: render(personaFiles),
+      sharedPersonaInstructions: render(personaFiles.slice(0, 1)), memoryRecallInstructions: "LIVE MEMORY" }),
+    renderCodexWorkspaceBootstrapPromptContext: () => "", renderCodexWorkspaceMemoryInstructions: () => "LIVE MEMORY",
+    CODEX_NATIVE_PROJECT_DOC_BASENAMES: new Set(), CODEX_BOOTSTRAP_CONTEXT_ORDER: new Map(),
+    embeddedAgentLog: { warn: (...args) => { throw new Error(JSON.stringify(args)); } },
+    listRegisteredPluginAgentPromptGuidance: () => [], SKILL_WORKSHOP_TOOL_NAME: "skill_workshop", buildCredentialSafetyPrompt: () => "NATIVE CREDENTIAL GUIDANCE",
+  };
+  // Separate bundles in separate realms: the relay key is a registered (cross-realm) symbol.
+  const load = name => {
+    const bundle = vm.createContext({ ...globals });
+    vm.runInContext(owner(name).replace(/^import .*;\n/mu, "").replace("import.meta.url", '"file:///adapter.js"'), bundle);
+    return bundle;
+  };
+  const realms = { workspace: load("buildCodexWorkspaceBootstrapContext"), skills: load("renderCodexSkillsInstructions"), developer: load("buildDeveloperInstructions") };
+  assert.equal(new Set(Object.values(realms)).size, 3);
+  const context = { buildCodexWorkspaceBootstrapContext: realms.workspace.buildCodexWorkspaceBootstrapContext,
+    renderCodexSkillsInstructions: realms.skills.renderCodexSkillsInstructions, buildDeveloperInstructions: realms.developer.buildDeveloperInstructions };
+  const params = { agentId: "main", config: { plugins: { entries: { "unblock-codex-prompt": { enabled: true, config: { frozenContext: true } } } } } };
+  const workspace = await context.buildCodexWorkspaceBootstrapContext({ params, resolvedWorkspace: "/workspace", effectiveWorkspace: "/workspace", sessionAgentId: "main", tools: [] });
+  const catalog = "<available_skills><skill><name>live</name><location>/workspace/skills/live/SKILL.md</location></skill></available_skills>";
+  assert.equal(context.renderCodexSkillsInstructions({ attempt: params, skillsPrompt: catalog, dynamicTools: [] }), undefined);
+  // Not parent-only and not the refreshable section: thread developer instructions carry it all.
+  assert.equal(workspace.personaInstructions, undefined);
+  assert.equal(workspace.sharedPersonaInstructions, undefined);
+  assert.equal(workspace.memoryInstructions, undefined);
+  assert.equal(context.buildDeveloperInstructions(params), "FLEET\n\n## OpenClaw Skills\n" + catalog + "\n\n" + render(personaFiles));
+  // Paths that never assembled workspace context (an upstream session fork) start without it;
+  // the thread's next turn differs and re-syncs it with the live catalog and persona.
+  assert.equal(context.buildDeveloperInstructions({ ...params }), "FLEET");
+  const upstream = await context.buildCodexWorkspaceBootstrapContext({ params: { ...params, agentId: "other" }, resolvedWorkspace: "/workspace", effectiveWorkspace: "/workspace", sessionAgentId: "other", tools: [] });
+  assert.match(upstream.personaInstructions, /LIVE SHARED SOUL[^]*LIVE PERSONAL/);
+  assert.match(upstream.sharedPersonaInstructions, /LIVE SHARED SOUL/);
+  assert.equal(context.renderCodexSkillsInstructions({ attempt: { ...params, agentId: "other" }, skillsPrompt: catalog, dynamicTools: [] }), "## OpenClaw Skills\n" + catalog);
 });

@@ -4,127 +4,90 @@ import { mkdtemp, mkdir, readFile, writeFile, realpath } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import vm from "node:vm";
-import { buildSkillsCatalog, compilePrompt } from "../dist/compiler.js";
-import { patchAdapterSources, prepareAdapter, installAdapter, restoreAdapter, readReceipt, adapterStatus } from "../dist/adapter.js";
+import { compilePrompt } from "../dist/compiler.js";
+import { patchAdapterSources, prepareAdapter, installAdapter, planAdapterRestore, applyAdapterRestore, codexAdapterOwnership, readReceipt, adapterStatus } from "../dist/adapter.js";
 import { assertSupportedVersion } from "../dist/compatibility.js";
 import { legacy, modern, adapterFixture, splitAdapterFixture } from "./fixtures/adapter-contexts.mjs";
 import { syncPrompt, restorePrompt, sha256 } from "../dist/manager.js";
-import { readFrozenPolicy } from "../dist/runtime.js";
-import * as runtime from "../dist/runtime.js";
+import { readCodexBaseInstructions, readFrozenPolicy } from "../dist/runtime.js";
 
 const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
+const restoreAdapter = async agentDir => applyAdapterRestore(await planAdapterRestore(agentDir));
+const refreshable = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8")).bundles;
 
-test("frozen documents/catalog refresh only on explicit sync; native files are excluded", async () => {
+async function codexPackage(root, version = "2026.10.8") {
+  const packageDir = join(root, "codex");
+  await mkdir(join(packageDir, "dist"), { recursive: true });
+  await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "@openclaw/codex", version }));
+  const paths = [];
+  for (const [name, source] of Object.entries(refreshable)) {
+    await writeFile(join(packageDir, "dist", name), source);
+    paths.push(join(packageDir, "dist", name));
+  }
+  return { packageDir, paths, originals: Object.values(refreshable) };
+}
+
+test("identity, workspace files and skills are never snapshotted; the base file holds only policy and the memory reference", async () => {
   const agentDir = await mkdtemp(join(await realpath(tmpdir()), "frozen-bridge-"));
   await mkdir(join(agentDir, "codex-home"));
-  await writeFile(join(agentDir, "SOUL.md"), "Soul A");
-  await writeFile(join(agentDir, "AGENTS.md"), "NATIVE_ONLY");
-  await writeFile(join(agentDir, "MEMORY.md"), "PRIVATE_MEMORY_BODY");
-  const catalog = { prompt: "<available_skills><skill>approved</skill></available_skills>", count: 1 };
-  const a = await compilePrompt("base", agentDir, catalog);
-  assert(!a.prompt.includes("NATIVE_ONLY"));
-  assert(!a.prompt.includes("PRIVATE_MEMORY_BODY"));
-  assert.match(a.prompt, /Soul A/);
+  for (const [name, text] of [["SOUL.md", "SOUL_BODY"], ["IDENTITY.md", "IDENTITY_BODY"], ["USER.md", "USER_BODY"], ["AGENTS.md", "AGENTS_BODY"], ["MEMORY.md", "PRIVATE_MEMORY_BODY"]]) {
+    await writeFile(join(agentDir, name), text);
+  }
+  await mkdir(join(agentDir, "skills", "approved"), { recursive: true });
+  await writeFile(join(agentDir, "skills", "approved", "SKILL.md"), "---\nname: approved\ndescription: Fixture only\n---\nSKILL_BODY\n");
+  const a = await compilePrompt("base", agentDir);
+  for (const body of ["SOUL_BODY", "IDENTITY_BODY", "USER_BODY", "AGENTS_BODY", "PRIVATE_MEMORY_BODY", "approved", "SKILL_BODY"]) assert(!a.prompt.includes(body), body);
+  assert.match(a.prompt, /^base\n\n## Agent context\nThe runtime supplies this agent's identity and workspace files live/);
+  assert.match(a.prompt, /## Memory reference\n[^]*MEMORY\.md\. Its contents are not included here\.[^]*conversations\.\n$/);
+  assert.doesNotMatch(a.prompt, /skills catalog|available_skills/i);
+  // Only the fields a 0.3 runtime reads, plus the Codex prefix receipt; no frozen-catalog provenance.
+  assert.deepEqual(Object.keys(a.bundle).sort(), ["basePromptLength", "policy", "schema"]);
   await syncPrompt({ agentDir, ...a });
   assert.equal(readFrozenPolicy(agentDir), "");
-  await writeFile(join(agentDir, "SOUL.md"), "Soul B");
-  assert.match(await readFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "utf8"), /Soul A/);
-  assert.equal(readFrozenPolicy(agentDir), "");
-  const b = await compilePrompt("base", agentDir, catalog);
-  await syncPrompt({ agentDir, ...b });
-  assert.match(await readFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "utf8"), /Soul B/);
+  assert.equal(readCodexBaseInstructions(agentDir), a.prompt);
+  await writeFile(join(agentDir, "SOUL.md"), "SOUL_EDITED");
+  assert.equal((await compilePrompt("base", agentDir)).prompt, a.prompt);
   await writeFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "foreign edit");
   assert.throws(() => readFrozenPolicy(agentDir), /outside sync/);
-  await restorePrompt({ agentDir, ...b });
+  assert.throws(() => readCodexBaseInstructions(agentDir), /outside sync/);
+  await restorePrompt({ agentDir, ...a });
   assert.equal(readFrozenPolicy(agentDir), null);
 });
 
-for (const [layout, assembly] of [["2026.9.2", legacy], ["2026.9.4", modern], ["2026.9.8", null], ["2026.9.9", null]]) {
-test(`${layout}: only target policy/context change; cron/default and extra context survive`, () => {
-  const sources = assembly === null ? splitAdapterFixture() : [adapterFixture(assembly)];
-  // 9.9 added a workspace producer while retaining the reviewed legacy carriers.
-  if (layout === "2026.9.9") sources.push("async function buildCodexWorkspaceBootstrapContext(params) { return {}; }");
-  const patched = patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js");
-  assert.throws(() => patchAdapterSources(patched, "/agent", "main", "/plugin/runtime.js"), /shape/);
-  assert.throws(() => patchAdapterSources([""], "/agent", "main", "/plugin/runtime.js"), /shape/);
-  assert.throws(() => patchAdapterSources(sources.map(source => source.replace("options.memoryCollaborationInstructions", "options.newContext")), "/agent", "main", "/plugin/runtime.js"), /context assembly/);
-  let policy = "frozen policy";
-  const contexts = patched.map(source => {
-    const context = vm.createContext({
-      unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => policy }),
-      resolveCodexThreadApprovalsReviewer: () => "user",
-      codexThreadSandboxOrPermissions: () => ({}),
-      buildCodexRuntimeThreadConfigForRun: (_params, config) => config,
-      resolveDirectOnlyToolNamespaces: () => [],
-    });
-    vm.runInContext(source.replace(/^import .*;\n/mu, "").replace("import.meta.url", '"file:///adapter.js"'), context);
-    return context;
-  });
-  const context = contexts.find(context => context.buildTurnScopedCollaborationInstructions);
-  const developer = contexts.find(context => context.buildDeveloperInstructions);
-  const params = { agentId: "main", config: { plugins: { entries: { "unblock-codex-prompt": { enabled: true, config: { frozenContext: true } } } } }, extraSystemPrompt: "ROUTING" };
-  const options = { turnScopedDeveloperInstructions: "SOUL", memoryCollaborationInstructions: "MEMORY", skillsCollaborationInstructions: "SKILLS", skillsInstructions: "SKILLS" };
-  const nativeContext = assembly === null ? "SOUL\n\nSKILLS\n\nMEMORY" : "SOUL\n\nMEMORY\n\nSKILLS";
-  assert.equal(developer.buildDeveloperInstructions(params), "frozen policy\n\nROUTING");
-  assert.equal(developer.buildDeveloperInstructions({ ...params, gitCoauthorPrompt: "COAUTHOR" }), "frozen policy\n\nCOAUTHOR\n\nROUTING");
-  assert.equal(context.buildTurnScopedCollaborationInstructions(params, options), "DEFAULT");
-  assert.equal(context.buildTurnScopedCollaborationInstructions({ ...params, trigger: "cron" }, options), "CRON");
-  assert.equal(developer.buildDeveloperInstructions({ ...params, agentId: "other" }), "native policy");
-  if (layout !== "2026.9.2") {
-    assert.equal(context.buildCodexParentLocalInstructions(params, options), null);
-    assert.equal(context.buildCodexParentLocalInstructions({ ...params, trigger: "cron" }, options), "CRON");
-    assert.equal(context.buildCodexParentLocalInstructions({ ...params, agentId: "other" }, options), nativeContext);
+test("Codex layouts older than the reviewed live-context carriers are refused", () => {
+  // 2026.9.2-2026.9.9 deliver persona in turn-scoped collaboration text native children never see.
+  for (const sources of [[adapterFixture(legacy)], [adapterFixture(modern)], splitAdapterFixture(),
+    [...splitAdapterFixture(), "async function buildCodexWorkspaceBootstrapContext(params) { return {}; }"]]) {
+    assert.throws(() => patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js"), /requires @openclaw\/codex >=2026\.10\.5/);
   }
-  const threadOptions = { ...options, appServer: { start: {} }, cwd: "/work", config: { keep: true } };
-  if (assembly === null) {
-    assert.equal(developer.buildCodexThreadConfiguration(params, threadOptions).developerInstructions, "frozen policy\n\nROUTING");
-    assert.equal(developer.buildCodexThreadConfiguration(params, { ...threadOptions, developerInstructions: "HOOK_POLICY" }).developerInstructions, "HOOK_POLICY");
-    assert.equal(developer.buildCodexThreadConfiguration({ ...params, agentId: "other" }, threadOptions).developerInstructions, "native policy\n\nSKILLS");
-    assert.equal(threadOptions.skillsInstructions, "SKILLS");
-    assert.equal(developer.buildCodexThreadConfiguration(params, threadOptions).cwd, "/work");
-  }
-  for (const plugins of [{ enabled: false }, { allow: [] }, { entries: {} }]) {
-    const disabled = { ...params, config: { plugins: { ...params.config.plugins, ...plugins } } };
-    assert.equal(context.buildTurnScopedCollaborationInstructions(disabled, options), "DEFAULT\n\n" + nativeContext);
-    if (assembly === null) assert.equal(developer.buildCodexThreadConfiguration(disabled, threadOptions).developerInstructions, "native policy\n\nSKILLS");
-  }
-  policy = null;
-  assert.equal(developer.buildDeveloperInstructions(params), "native policy");
-  assert.equal(context.buildTurnScopedCollaborationInstructions(params, options), "DEFAULT\n\n" + nativeContext);
-  if (assembly === null) assert.equal(developer.buildCodexThreadConfiguration(params, threadOptions).developerInstructions, "native policy\n\nSKILLS");
 });
-}
 
 test("version floor permits newer stable builds, not old or prerelease builds", () => {
-  for (const version of ["2026.9.2", "2026.9.2-1", "2026.9.4", "2026.10.1", "2027.1.1"]) assert.doesNotThrow(() => assertSupportedVersion(version, "OpenClaw"));
-  for (const version of ["2026.5.27", "2026.9.1", "2025.12.99", "2026.9.4-beta.1", null, "garbage"]) assert.throws(() => assertSupportedVersion(version, "OpenClaw"), />=2026.9.2/);
+  for (const version of ["2026.10.5", "2026.10.5-1", "2026.10.9", "2026.11.1", "2027.1.1"]) assert.doesNotThrow(() => assertSupportedVersion(version, "OpenClaw"));
+  for (const version of ["2026.9.2", "2026.9.9", "2026.10.4", "2025.12.99", "2026.10.6-beta.1", null, "garbage"]) assert.throws(() => assertSupportedVersion(version, "OpenClaw"), />=2026.10.5/);
 });
 
-test("2026.9.8 split bundles install together and restore exact originals", async () => {
+test("multi-bundle installs are idempotent, refuse foreign edits and recover an interrupted runtime-path upgrade", async () => {
   const root = await mkdtemp(join(await realpath(tmpdir()), "adapter-split-"));
   const agentDir = join(root, "agent");
-  const packageDir = join(root, "codex");
   await mkdir(join(agentDir, "codex-home"), { recursive: true });
-  await mkdir(join(packageDir, "dist", ".setup"), { recursive: true });
-  await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "@openclaw/codex", version: "2026.9.8" }));
-  const originals = splitAdapterFixture();
-  const paths = ["thread-lifecycle-new.mjs", "thread-requests-new.mjs"].map(name => join(packageDir, "dist", ".setup", name));
-  for (const [i, path] of paths.entries()) await writeFile(path, originals[i]);
+  const { packageDir, paths, originals } = await codexPackage(root);
   const plan = await prepareAdapter(agentDir, "main", packageDir, runtimePath);
+  assert.ok(plan.files.length > 1);
   await installAdapter(agentDir, plan);
   assert.equal((await adapterStatus(agentDir)).installed, true);
   assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, runtimePath))).adapterChanged, false);
-  await writeFile(paths[1], plan.files[1].patched + "// foreign change");
+  const [first, second] = plan.files;
+  await writeFile(second.path, second.patched + "// foreign change");
   await assert.rejects(restoreAdapter(agentDir), /Foreign adapter edit/);
-  assert.equal(await readFile(paths[0], "utf8"), plan.files[0].patched);
-  await writeFile(paths[1], plan.files[1].patched);
+  assert.equal(await readFile(first.path, "utf8"), first.patched);
+  await writeFile(second.path, second.patched);
   const changedRuntime = join(root, "runtime.js");
   await writeFile(changedRuntime, await readFile(runtimePath, "utf8"));
   const upgrade = await prepareAdapter(agentDir, "main", packageDir, changedRuntime);
   await installAdapter(agentDir, upgrade);
   // Simulate interruption after receipt publication and only one upgraded bundle.
-  await writeFile(paths[1], plan.files[1].patched);
+  await writeFile(second.path, second.patched);
   assert.equal((await adapterStatus(agentDir)).installed, false);
   await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, changedRuntime));
   assert.equal((await adapterStatus(agentDir)).installed, true);
@@ -132,7 +95,7 @@ test("2026.9.8 split bundles install together and restore exact originals", asyn
   assert.deepEqual(await Promise.all(paths.map(path => readFile(path, "utf8"))), originals);
 });
 
-test("0.2.0 single-file receipts restore and migrate away from expired runtime paths", async () => {
+test("0.2.0 single-file receipts still restore; re-sync of that old Codex package is refused", async () => {
   const root = await mkdtemp(join(await realpath(tmpdir()), "adapter-receipt-v1-"));
   const agentDir = join(root, "agent");
   const home = join(agentDir, "codex-home");
@@ -142,63 +105,41 @@ test("0.2.0 single-file receipts restore and migrate away from expired runtime p
   await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "@openclaw/codex", version: "2026.9.4" }));
   const path = join(packageDir, "dist", "thread-lifecycle-old.js");
   const original = adapterFixture(modern);
-  const [oldPatch] = patchAdapterSources([original], agentDir, "main", "/expired/runtime.js");
+  const oldPatch = "// unblock-codex-prompt bridge v1\n" + original;
   await writeFile(path, oldPatch);
   await writeFile(join(home, ".unblock-codex-prompt-adapter-original.js"), original);
-  const receiptPath = join(home, ".unblock-codex-prompt-adapter.json");
-  await writeFile(receiptPath, JSON.stringify({
+  await writeFile(join(home, ".unblock-codex-prompt-adapter.json"), JSON.stringify({
     schema: 1, packageDir, path, originalSha256: sha256(original), patchedSha256: sha256(oldPatch),
   }));
-  await restoreAdapter(agentDir);
-  assert.equal(await readFile(path, "utf8"), original);
+  // Its only file holds neither our bytes nor the original: not owned, so restore leaves it alone.
+  await writeFile(path, oldPatch + "// foreign");
+  assert.equal(await codexAdapterOwnership(agentDir), "changed");
+  assert.deepEqual(await restoreAdapter(agentDir), { ownership: "changed", files: [], superseded: [], restartRequired: false });
+  assert.equal(await readFile(path, "utf8"), oldPatch + "// foreign");
+  await assert.rejects(prepareAdapter(agentDir, "main", undefined, runtimePath), /another writer/);
   await writeFile(path, oldPatch);
-  const plan = await prepareAdapter(agentDir, "main", undefined, runtimePath);
-  await installAdapter(agentDir, plan);
-  assert.equal((await readReceipt(agentDir)).schema, 2);
-  // The receipt owns both sides of an interrupted old-to-new source swap.
-  await writeFile(path, oldPatch);
   await restoreAdapter(agentDir);
   assert.equal(await readFile(path, "utf8"), original);
-  await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, runtimePath));
-  assert.equal((await adapterStatus(agentDir)).installed, true);
-  await restoreAdapter(agentDir);
-  assert.equal(await readFile(path, "utf8"), original);
+  await assert.rejects(prepareAdapter(agentDir, "main", undefined, runtimePath), />=2026\.10\.5/);
 });
 
 test("renamed bundles retain exact backups, idempotence and foreign-edit/path protection", async () => {
   const root = await mkdtemp(join(await realpath(tmpdir()), "adapter-compat-"));
   const agentDir = join(root, "agent");
-  const packageDir = join(root, "codex");
   await mkdir(join(agentDir, "codex-home"), { recursive: true });
-  await mkdir(join(packageDir, "dist"), { recursive: true });
-  await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "@openclaw/codex", version: "2026.9.4" }));
-  const path = join(packageDir, "dist", "thread-lifecycle-new-hash.mjs");
-  const original = adapterFixture(modern);
-  await writeFile(path, original);
+  const { packageDir } = await codexPackage(root);
   const plan = await prepareAdapter(agentDir, "main", packageDir, runtimePath);
   await installAdapter(agentDir, plan);
   assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, runtimePath))).adapterChanged, false);
-  await writeFile(path, plan.files[0].patched + "// foreign change");
+  const [file] = plan.files;
+  await writeFile(file.path, file.patched + "// foreign change");
   await assert.rejects(prepareAdapter(agentDir, "main", undefined, runtimePath), /another writer/);
   await assert.rejects(restoreAdapter(agentDir), /Foreign adapter edit/);
-  await writeFile(path, plan.files[0].patched);
+  await writeFile(file.path, file.patched);
   await restoreAdapter(agentDir);
-  assert.equal(await readFile(path, "utf8"), original);
+  assert.equal(await readFile(file.path, "utf8"), file.original);
   const receiptPath = join(agentDir, "codex-home", ".unblock-codex-prompt-adapter.json");
   const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
   await writeFile(receiptPath, JSON.stringify({ ...receipt, files: [{ ...receipt.files[0], path: join(root, "thread-lifecycle-escape.js") }] }));
   await assert.rejects(readReceipt(agentDir), /Invalid adapter receipt/);
-});
-
-test("snapshot uses OpenClaw eligibility, agent allowlist and model visibility", async () => {
-  const workspace = await mkdtemp(join(await realpath(tmpdir()), "frozen-skills-"));
-  for (const [name, extra] of [["bridge-visible", ""], ["bridge-hidden", "disable-model-invocation: true\n"], ["bridge-disabled", ""], ["bridge-excluded", ""]]) {
-    await mkdir(join(workspace, "skills", name), { recursive: true });
-    await writeFile(join(workspace, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: Fixture only\n${extra}---\nTest body\n`);
-  }
-  const config = { plugins: { enabled: false }, agents: { list: [{ id: "main", workspace, skills: ["bridge-visible", "bridge-hidden", "bridge-disabled"] }] }, skills: { entries: { "bridge-disabled": { enabled: false } } } };
-  const catalog = await buildSkillsCatalog(config, "main", workspace);
-  assert.equal(catalog.count, 1);
-  assert.match(catalog.prompt, /bridge-visible/);
-  for (const omitted of ["bridge-hidden", "bridge-disabled", "bridge-excluded"]) assert(!catalog.prompt.includes(omitted));
 });

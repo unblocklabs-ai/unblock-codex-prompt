@@ -1,7 +1,7 @@
 {
   "name": "@unblocklabs/unblock-codex-prompt",
-  "version": "0.3.0",
-  "description": "Manage a shared Codex base prompt for an OpenClaw agent.",
+  "version": "0.4.0",
+  "description": "Manage a shared fleet prompt for an OpenClaw agent on Codex and Claude CLI.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,23 +21,23 @@
   "devDependencies": {
     "@openclaw/plugin-inspector": "^0.3.25",
     "@types/node": "^22.0.0",
-    "openclaw": "2026.9.2",
+    "openclaw": "2026.10.9",
     "typescript": "^5.9.3"
   },
-  "peerDependencies": { "openclaw": ">=2026.9.2" },
+  "peerDependencies": { "openclaw": ">=2026.10.5" },
   "peerDependenciesMeta": { "openclaw": { "optional": true } },
   "openclaw": {
     "extensions": ["./dist/index.js"],
-    "install": { "npmSpec": "@unblocklabs/unblock-codex-prompt", "defaultChoice": "npm", "minHostVersion": ">=2026.9.2" },
+    "install": { "npmSpec": "@unblocklabs/unblock-codex-prompt", "defaultChoice": "npm", "minHostVersion": ">=2026.10.5" },
     "release": { "publishToClawHub": false, "publishToNpm": true },
-    "compat": { "pluginApi": ">=2026.9.2", "minGatewayVersion": ">=2026.9.2" },
-    "build": { "openclawVersion": "2026.9.2", "pluginSdkVersion": "2026.9.2" }
+    "compat": { "pluginApi": ">=2026.10.5", "minGatewayVersion": ">=2026.10.5" },
+    "build": { "openclawVersion": "2026.10.9", "pluginSdkVersion": "2026.10.9" }
   },
   "engines": { "node": ">=22.22.3" },
   "publishConfig": { "access": "public" },
   "license": "MIT",
   "author": "Unblock Labs",
-  "keywords": ["openclaw", "openclaw-plugin", "codex", "prompt"],
+  "keywords": ["openclaw", "openclaw-plugin", "codex", "claude-cli", "prompt"],
   "repository": { "type": "git", "url": "git+https://github.com/unblocklabs-ai/unblock-codex-prompt.git" },
   "bugs": { "url": "https://github.com/unblocklabs-ai/unblock-codex-prompt/issues" },
   "homepage": "https://github.com/unblocklabs-ai/unblock-codex-prompt#readme"
