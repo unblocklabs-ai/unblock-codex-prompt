@@ -40,7 +40,7 @@ async function enrolledRemote() {
 
 test("shared refresh changes only the policy prefix and leaves unchanged prompt bytes/inode alone", async () => {
   const f = await enrolledRemote();
-  assert.ok(f.compiled.prompt.startsWith(text.trim() + "\n\n## Agent context\n"));
+  assert.ok(f.compiled.prompt.startsWith(text.trim() + "\n\n## Memory reference\n"));
   await writeFile(join(f.agentDir, "SOUL.md"), "New soul must not leak into refresh");
   const updated = "<primary_instructions>\nNew shared policy 🦀\n</primary_instructions>\n";
   const fetchBase = { codex: () => fetchPrompt(url, async () => response(updated)) };
@@ -96,22 +96,33 @@ test("failed validation retains prompt and receipt; restored and foreign state n
   assert.equal((await refreshSharedPrompt(f.agentDir, never)).skipped, true);
 });
 
-test("a 0.3 snapshot with the frozen-context heading refreshes; a snapshot without a prefix length is refused", async () => {
+test("0.3 and 0.4-branch snapshots refresh by their older boundary headings; unknown boundaries and missing prefix lengths are refused", async () => {
+  // 0.3.x snapshots start their context with `## Frozen agent context`, 0.4 branch builds with
+  // `## Agent context`; every remote snapshot records its prefix length.
+  for (const legacy of ["\n\n## Frozen agent context\nOld context.", "\n\n## Agent context\nOld context."]) {
+    const f = await enrolledRemote();
+    const original = f.compiled.prompt.slice(0, f.compiled.bundle.basePromptLength) + legacy + f.compiled.prompt.slice(f.compiled.bundle.basePromptLength);
+    const bundle = JSON.parse(await readFile(f.bundlePath, "utf8"));
+    bundle.promptSha256 = sha256(original);
+    await writeFile(f.path, original);
+    await writeFile(f.bundlePath, JSON.stringify(bundle));
+    await refreshSharedPrompt(f.agentDir, { codex: () => fetchPrompt(url, async () => response("New base\n")) });
+    assert.equal(await readFile(f.path, "utf8"), "New base" + original.slice(f.compiled.bundle.basePromptLength));
+    const prompt = await readFile(f.path, "utf8");
+    const missing = JSON.parse(await readFile(f.bundlePath, "utf8"));
+    delete missing.basePromptLength;
+    await writeFile(f.bundlePath, JSON.stringify(missing));
+    await assert.rejects(refreshSharedPrompt(f.agentDir, { codex: () => { assert.fail("must not fetch"); } }), /ambiguous/);
+    assert.equal(await readFile(f.path, "utf8"), prompt);
+  }
   const f = await enrolledRemote();
-  // 0.3.x snapshots used the frozen-context heading; every remote snapshot records its prefix length.
-  const original = f.compiled.prompt.replace("\n\n## Agent context\n", "\n\n## Frozen agent context\n");
+  const unknown = f.compiled.prompt.replace("\n\n## Memory reference\n", "\n\n## Something else\n");
   const bundle = JSON.parse(await readFile(f.bundlePath, "utf8"));
-  bundle.promptSha256 = sha256(original);
-  await writeFile(f.path, original);
+  bundle.promptSha256 = sha256(unknown);
+  await writeFile(f.path, unknown);
   await writeFile(f.bundlePath, JSON.stringify(bundle));
-  await refreshSharedPrompt(f.agentDir, { codex: () => fetchPrompt(url, async () => response("New base\n")) });
-  assert.equal(await readFile(f.path, "utf8"), "New base" + original.slice(f.compiled.bundle.basePromptLength));
-  const prompt = await readFile(f.path, "utf8");
-  const missing = JSON.parse(await readFile(f.bundlePath, "utf8"));
-  delete missing.basePromptLength;
-  await writeFile(f.bundlePath, JSON.stringify(missing));
   await assert.rejects(refreshSharedPrompt(f.agentDir, { codex: () => { assert.fail("must not fetch"); } }), /ambiguous/);
-  assert.equal(await readFile(f.path, "utf8"), prompt);
+  assert.equal(await readFile(f.path, "utf8"), unknown);
 });
 
 test("receipt publication failure rolls back the prompt while preserving the concurrent receipt edit", async () => {

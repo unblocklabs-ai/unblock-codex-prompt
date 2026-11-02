@@ -64,16 +64,19 @@ const render = (overrides) => JSON.parse(execFileSync(process.execPath, ["--inpu
 const managed = render({});
 if (process.env.PRINT_PROMPT) console.error(managed);
 for (const expected of ["CLAUDE POLICY BASE", "LIVE SOUL", "LIVE IDENTITY", "LIVE SHARED USER", "LIVE AGENTS", "LIVE TOOLS", "LIVE PERSONAL USER", "## Memory reference",
-  "UNKNOWN EXTRA CONTEXT", "Incognito: do not persist.", "## Messaging", "## Assistant Output Directives", "## Authorized Senders", "## Runtime"]) {
+  "## OpenClaw runtime context", "UNKNOWN EXTRA CONTEXT", "Incognito: do not persist.", "## Messaging", "## Assistant Output Directives", "## Authorized Senders", "## Runtime"]) {
   assert.ok(managed.includes(expected), "managed prompt lacks " + expected);
 }
 for (const absent of ["You are a personal assistant running inside OpenClaw.", "CODEX POLICY BASE", "skills catalog", "DISK SOUL", "DISK IDENTITY", "DISK SHARED USER",
-  "LIVE MEMORY BODY", "## Execution Bias", "## Care", "## OpenClaw Control", "## Tool Call Style", "## Silent Replies"]) {
+  "LIVE MEMORY BODY", "## Execution Bias", "## Care", "## OpenClaw Control", "## Tool Call Style", "## Silent Replies",
+  // Delivery-status prose removed from the plugin's own injected text.
+  "## Agent context", "The runtime supplies this agent's identity", "Its contents are not included here", "Live session catalog", "The latest snapshot for each fact family"]) {
   assert.ok(!managed.includes(absent), "managed prompt still contains " + absent);
 }
 assert.equal(managed.split("CLAUDE POLICY BASE").length, 2, "Claude policy appears once");
 const liveSkills = render({ skillsPrompt: "<available_skills>LIVE SESSION SKILL</available_skills>" });
 assert.ok(liveSkills.includes("LIVE SESSION SKILL"), "live session skills survive when no native mount exists");
+assert.ok(liveSkills.includes("## OpenClaw skills\nBefore following a matching skill, read its <location>.\n<available_skills>LIVE SESSION SKILL"), "session skills keep their read-before-use instruction");
 // The final-adoption gate must accept what the real assembly renders, across delivery shapes.
 for (const [name, prompt] of Object.entries({ managed, liveSkills,
   automatic: render({ sourceReplyDeliveryMode: "automatic" }), webchat: render({ runtimeChannel: "webchat", runtimeChatType: "direct" }),

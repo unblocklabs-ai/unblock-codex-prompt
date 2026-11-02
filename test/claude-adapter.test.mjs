@@ -137,6 +137,23 @@ test("patched CLI assembly manages only the enrolled agent on claude-cli and fai
   assert.equal("unblockManagedClaude" in build({}), false);
 });
 
+test("plugin-injected Claude prose is functional and carries no delivery-status wording", async () => {
+  const agentDir = await enrolledAgent();
+  const plan = await prepareClaudeAdapter(agentDir, "main", runtimePath, await fakeCore());
+  const patched = plan.files.find(file => file.path.endsWith("system-prompt-test.mjs")).patched;
+  const start = patched.indexOf("function unblockManagedSkillsLines(");
+  const end = patched.indexOf("\n}\n", patched.indexOf("function unblockManagedRuntimeContextLines(")) + 3;
+  const context = vm.createContext({});
+  vm.runInContext(patched.slice(start, end), context);
+  const skills = [...context.unblockManagedSkillsLines("<available_skills>S</available_skills>")];
+  assert.deepEqual(skills, ["## OpenClaw skills", "Before following a matching skill, read its <location>.", "<available_skills>S</available_skills>"]);
+  assert.deepEqual([...context.unblockManagedSkillsLines("")], []);
+  const injected = [...skills.slice(0, 2), ...context.unblockManagedRuntimeContextLines(), runtime.readClaudeManagedPrompt(agentDir).prompt.replace(/^FLEET POLICY\n\n/u, "")].join("\n");
+  assert.match(injected, /^## OpenClaw skills\n[^]*## OpenClaw runtime context\n[^]*\n## Memory reference\n/u);
+  // Status words the owner bans from model-facing text: what is live, frozen, a snapshot, refreshed, etc.
+  assert.doesNotMatch(injected, /\b(?:live|frozen|snapshots?|refresh(?:ed|es)?|synced|cached|currently|draft)\b|supplied|loaded every|not included|## Agent context/iu);
+});
+
 test("ownership reflects disk: partial restore is still owned; a clean restore allows another OpenClaw root; updates supersede", async () => {
   const { claudeAdapterOwnership } = await import("../dist/claude-adapter.js");
   const { restorePrompt } = await import("../dist/manager.js");

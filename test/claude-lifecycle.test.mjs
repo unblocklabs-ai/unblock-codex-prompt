@@ -35,14 +35,14 @@ test("Claude-only enrollment writes no Codex configuration and refreshes/restore
   assert.deepEqual(JSON.parse(await readFile(join(home, ".unblock-codex-prompt.json"), "utf8")), { schema: 2, active: true, previousPointer: null, runtimes: ["claude-cli"] });
   assert.throws(() => readFrozenPolicy(agentDir), /Codex bridge installed without Codex enrollment/);
   const managed = readClaudeManagedPrompt(agentDir);
-  assert.match(managed.prompt, /^FLEET POLICY\n\n## Agent context\n[^]*## Memory reference/);
+  assert.match(managed.prompt, /^FLEET POLICY\n\n## Memory reference\n/);
   // Identity files are live in the host's project context, never in the managed snapshot.
   assert.doesNotMatch(managed.prompt, /skills catalog|SOUL A/i);
 
   const refreshed = await refreshSharedPrompt(agentDir, { claude: async () => ({ prompt: "FLEET POLICY B", source: { url: "https://example.test/prompt?runtime=claude", revision: sha256("FLEET POLICY B") } }) });
   assert.equal(refreshed.nextClaudeProcess, true);
   assert.equal("newSessionRequired" in refreshed, false);
-  assert.match(readClaudeManagedPrompt(agentDir).prompt, /^FLEET POLICY B\n\n## Agent context/);
+  assert.match(readClaudeManagedPrompt(agentDir).prompt, /^FLEET POLICY B\n\n## Memory reference\n/);
 
   await restorePrompt({ agentDir, prompt: "" });
   assert.equal(readClaudeManagedPrompt(agentDir), null);

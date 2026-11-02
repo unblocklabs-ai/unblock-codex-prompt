@@ -37,8 +37,9 @@ test("identity, workspace files and skills are never snapshotted; the base file 
   await writeFile(join(agentDir, "skills", "approved", "SKILL.md"), "---\nname: approved\ndescription: Fixture only\n---\nSKILL_BODY\n");
   const a = await compilePrompt("base", agentDir);
   for (const body of ["SOUL_BODY", "IDENTITY_BODY", "USER_BODY", "AGENTS_BODY", "PRIVATE_MEMORY_BODY", "approved", "SKILL_BODY"]) assert(!a.prompt.includes(body), body);
-  assert.match(a.prompt, /^base\n\n## Agent context\nThe runtime supplies this agent's identity and workspace files live/);
-  assert.match(a.prompt, /## Memory reference\n[^]*MEMORY\.md\. Its contents are not included here\.[^]*conversations\.\n$/);
+  assert.match(a.prompt, /^base\n\n## Memory reference\nWhen prior context matters, use the available memory tools[^]*MEMORY\.md\. Read it only when[^]*conversations\.\n$/);
+  // The agent context is functional only: no delivery-status or lifecycle claims.
+  assert.doesNotMatch(a.prompt, /## Agent context|\blive\b|snapshot|not included|currently/i);
   assert.doesNotMatch(a.prompt, /skills catalog|available_skills/i);
   // Only the fields a 0.3 runtime reads, plus the Codex prefix receipt; no frozen-catalog provenance.
   assert.deepEqual(Object.keys(a.bundle).sort(), ["basePromptLength", "policy", "schema"]);

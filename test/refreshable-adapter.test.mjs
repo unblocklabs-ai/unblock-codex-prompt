@@ -262,7 +262,7 @@ test("managed request assembly removes only reviewed additions and preserves per
   const unfamiliarExec = steadyExec + "\nUNREVIEWED EXEC CONTEXT";
   assert.equal(runtime.normalizeOpenClawAdditions(unfamiliarExec), unfamiliarExec);
   await context.refreshCodexThreadPolicy({ unblockManaged: true, developerInstructions: "" });
-  assert.equal(handoffs.at(-1), "Current OpenClaw generic policy replaces all earlier OpenClaw generic policy; removed sections are withdrawn.\n\n");
+  assert.equal(handoffs.at(-1), "Follow the OpenClaw developer instructions below in place of any earlier OpenClaw developer instructions in this conversation.\n\n");
   await context.refreshCodexThreadPolicy({ developerInstructions: "OTHER POLICY" });
   assert.match(handoffs.at(-1), /Independently supplied native/);
   for (const name of Object.keys(operational.functions)) {

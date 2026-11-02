@@ -60,8 +60,8 @@
   `claudePolicy.text + "\n\n" + agentContext` from the receipt only, with the prompt file
   still checked against `promptSha256`. Removed: `catalogLength`, the frozen-catalog
   boundary check and the dead `policy.trim()` join (P3-12).
-- **Claude-only prompt file** holds just the agent context (`## Agent context` +
-  `## Memory reference`). Claude-only sync never fetches the Codex artifact; no
+- **Claude-only prompt file** holds just the agent context (the
+  `## Memory reference` section). Claude-only sync never fetches the Codex artifact; no
   `remotePrompt`/`basePromptLength`.
 - **Sync and refresh** fetch every enrolled runtime before writing. Any failure writes
   nothing; HTTP 400 for `runtime=claude` (a Worker without runtime support) and a missing
@@ -118,8 +118,8 @@
 - **Startup log:** without the grant it reports that the gate is not registered and runs
   are not checked.
 - **Removed:** `promptMatches`/`expectedSha256`, refresh's branch for snapshots without
-  `basePromptLength` (every remote snapshot since 0.1.0 records it; the old heading is
-  still accepted), and `restoreAdapter`/`restoreClaudeAdapter`.
+  `basePromptLength` (every remote snapshot since 0.1.0 records it; the older
+  `## Agent context` and `## Frozen agent context` boundary headings are still accepted), and `restoreAdapter`/`restoreClaudeAdapter`.
 - Tests: a table-driven suite runs seven ownership/restore scenarios against both
   adapters with identical outcomes. Further tests cover a version-less 0.3 receipt after
   an update renames its bundles, a deleted OpenClaw root, a refused restore leaving the
@@ -198,9 +198,10 @@ AGENTS.md are no longer snapshotted; both runtimes deliver them live every turn.
   against the real 2026.10.9 code: warm threads compare a request fingerprint that
   includes `baseInstructions` and resume on mismatch; incognito threads compare only
   developer instructions, so they keep their starting revision. Checked live with Codex
-  CLI 0.166.0 app-server: a thread started with base A answered A; the same thread
-  resumed with base B answered B; resumed without a base it fell back to the configured
-  base. The real 10.5–10.9 packages patch and pass `node --check`.
+  CLI 0.166.0 app-server, and again with **0.160.0**, the app-server version pinned by
+  `@openclaw/codex` 2026.10.5–10.9 (`CODEX_APP_SERVER_VERSION`). In both, a thread started
+  with base A answered A, the same thread resumed with base B answered B, and a resume
+  without a base fell back to the configured base. The real 10.5–10.9 packages patch and pass `node --check`.
 
 **Not yet validated live:** a policy refresh or persona edit reaching an existing
 Codex thread through the policy handoff on the next turn, a resumed Claude conversation

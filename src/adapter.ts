@@ -240,7 +240,7 @@ function patchOperationalAdapter(sources: string[], prefix: string) {
       if (name === "resumeExistingCodexThread") {
         replacement = original.replace("await refreshCodexThreadPolicy({", "await refreshCodexThreadPolicy({\n\t\t\tunblockManaged: unblockFrozenPolicy(params.params) !== null,");
       } else if (name === "refreshCodexThreadPolicy") {
-        replacement = original.replace("{\n", '{\n\tif (params.unblockManaged) {\n\t\tawait injectCodexThreadDeveloperHandoff(params, "Current OpenClaw generic policy replaces all earlier OpenClaw generic policy; removed sections are withdrawn.\\n\\n" + params.developerInstructions);\n\t\treturn;\n\t}\n');
+        replacement = original.replace("{\n", '{\n\tif (params.unblockManaged) {\n\t\tawait injectCodexThreadDeveloperHandoff(params, "Follow the OpenClaw developer instructions below in place of any earlier OpenClaw developer instructions in this conversation.\\n\\n" + params.developerInstructions);\n\t\treturn;\n\t}\n');
       } else {
         const originalName = "unblockOriginal" + name;
         const value = name === "buildTurnStartParams" ? "result.additionalContext" : "result";

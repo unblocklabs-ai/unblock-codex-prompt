@@ -50,7 +50,7 @@ test("Codex-only sync and refresh never send runtime= and work against a Worker 
   assert.equal(w.calls.length, 2);
   for (const call of w.calls) assert.equal(call.href, url, "the configured URL is requested exactly as written");
   assert.equal(readFrozenPolicy(agentDir), "");
-  assert.match(readCodexBaseInstructions(agentDir), /^CODEX POLICY A\n\n## Agent context\n[^]*## Memory reference\n[^]*conversations\.\n$/);
+  assert.match(readCodexBaseInstructions(agentDir), /^CODEX POLICY A\n\n## Memory reference\n[^]*conversations\.\n$/);
   assert.doesNotMatch(readCodexBaseInstructions(agentDir), /skills catalog/i);
   const bundle = await bundleOf(agentDir);
   assert.equal("claudePolicy" in bundle || "agentContext" in bundle, false);
@@ -68,7 +68,7 @@ test("Claude-only sync never requests the Codex artifact; the prompt file is the
   // Claude-only choice: the prompt file holds exactly the shared agent context (no policy),
   // so its hash still anchors the bundle and refresh has no Codex prefix to replace.
   assert.equal(file, bundle.agentContext);
-  assert.match(file, /^## Agent context\n[^]*## Memory reference/);
+  assert.match(file, /^## Memory reference\n/);
   assert.doesNotMatch(file, /CLAUDE POLICY|CODEX POLICY|skills catalog/);
   assert.deepEqual([bundle.policy, "sources" in bundle, "skillCount" in bundle, "remotePrompt" in bundle, "basePromptLength" in bundle], ["", false, false, false, false]);
   assert.deepEqual(bundle.claudePolicy, { text: "CLAUDE POLICY A", url: `${url}&runtime=claude`, revision: sha256("CLAUDE POLICY A"), checkedAt: 100 });
@@ -81,7 +81,7 @@ test("Claude-only sync never requests the Codex artifact; the prompt file is the
   assert.deepEqual(w.calls.map(call => call.search), ["?channel=prod&runtime=claude"]);
   assert.deepEqual([refreshed.changed, refreshed.nextClaudeProcess, "nextCodexTurn" in refreshed, "revision" in refreshed], [true, true, false, false]);
   assert.equal(await readFile(files(agentDir).prompt, "utf8"), file, "the Claude-only prompt file is untouched");
-  assert.match(readClaudeManagedPrompt(agentDir).prompt, /^CLAUDE POLICY B\n\n## Agent context/);
+  assert.match(readClaudeManagedPrompt(agentDir).prompt, /^CLAUDE POLICY B\n\n## Memory reference\n/);
 });
 
 test("a both-runtime sync makes exactly two fetches: Codex without runtime, Claude with runtime=claude, channel preserved", async () => {
@@ -237,7 +237,7 @@ test("status reports each runtime's policy revision and never policy text", asyn
   const status = JSON.parse(output.at(-1));
   assert.deepEqual(status.remotePrompt, { url, revision: sha256("CODEX POLICY A"), checkedAt: 100 });
   assert.deepEqual(status.claudePolicy, { url: `${url}&runtime=claude`, revision: sha256("CLAUDE POLICY A"), checkedAt: 100 });
-  assert.doesNotMatch(output.at(-1), /CLAUDE POLICY A|CODEX POLICY A|## Agent context/);
+  assert.doesNotMatch(output.at(-1), /CLAUDE POLICY A|CODEX POLICY A|## Memory reference/);
 
   await restorePrompt({ agentDir, prompt: "" });
   output.length = 0;

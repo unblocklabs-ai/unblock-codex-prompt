@@ -18,9 +18,13 @@ export type ClaudePolicy = PolicyReceipt & { text: string };
  */
 export type FrozenBundle = { schema: 1; policy: string; basePromptLength?: number;
   remotePrompt?: { url: string; revision: string; checkedAt?: number }; claudePolicy?: ClaudePolicy; agentContext?: string };
-/** Boundary after the shared prefix; older snapshots used the frozen-context heading. */
-export const AGENT_CONTEXT_HEADER = "\n\n## Agent context\n";
-export const FROZEN_CONTEXT_HEADER = "\n\n## Frozen agent context\n";
+/** First heading of the agent context, the boundary after the shared policy prefix. */
+export const MEMORY_REFERENCE_HEADER = "\n\n## Memory reference\n";
+/**
+ * Accepted boundaries: the current first heading, then the 0.4 branch builds' `## Agent context`
+ * and the 0.3 `## Frozen agent context`, so their prompt files still refresh in place.
+ */
+export const CONTEXT_BOUNDARY_HEADERS = [MEMORY_REFERENCE_HEADER, "\n\n## Agent context\n", "\n\n## Frozen agent context\n"] as const;
 
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 
@@ -255,11 +259,11 @@ export async function refreshSharedPrompt(agentDir: string, fetchers: { codex?: 
       try { previousClaude = parseClaudePolicy(bundle.claudePolicy); } catch { throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync"); }
       if (typeof bundle.agentContext !== "string" || !bundle.agentContext.trim()) throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync");
     }
-    // Every remote snapshot records its prefix length (0.1.0 onwards); 0.3.x and older ones
-    // start their agent context with the frozen-context heading.
+    // Every remote snapshot records its prefix length (0.1.0 onwards); the agent context after it
+    // starts with one of the accepted boundary headings (current, 0.4 branch or 0.3).
     const boundary = bundle.basePromptLength;
     if (codex && (typeof boundary !== "number" || !Number.isInteger(boundary) || boundary <= 0 ||
-        !(s.prompt.slice(boundary).startsWith(AGENT_CONTEXT_HEADER) || s.prompt.slice(boundary).startsWith(FROZEN_CONTEXT_HEADER)))) {
+        !CONTEXT_BOUNDARY_HEADERS.some(header => s.prompt!.slice(boundary).startsWith(header)))) {
       throw new Error("Frozen context boundary is ambiguous; run codex-prompt sync");
     }
     const [codexRemote, claudeRemote] = await Promise.all([codex ? fetchers.codex?.() : undefined, claude ? fetchers.claude?.() : undefined]);

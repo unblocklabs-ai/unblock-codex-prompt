@@ -215,7 +215,7 @@ A Claude-only agent needs no Codex package, TOML pointer, provider catalog
 credentials or Codex skill-config writes. Snapshot files still live under
 `<agentDir>/codex-home/`. Its sync never fetches the Codex artifact. Its generated
 prompt file holds only the shared agent context
-(`## Agent context` and `## Memory reference`), so the file's hash still anchors the
+(the `## Memory reference` section), so the file's hash still anchors the
 sync receipt; there is no Codex policy prefix to refresh. Adding Codex later (sync) regenerates
 the file in the Codex layout.
 

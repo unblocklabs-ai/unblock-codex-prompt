@@ -192,7 +192,7 @@ test("remote-only CLI sync installs both prompt replacements; refresh and restor
   remoteText = "REMOTE B";
   await run("refresh");
   const updated = await readFile(promptPath, "utf8");
-  assert.equal(updated, "REMOTE B" + prompt.slice(prompt.indexOf("\n\n## Agent context\n")));
+  assert.equal(updated, "REMOTE B" + prompt.slice(prompt.indexOf("\n\n## Memory reference\n")));
   // The patched thread requests send this file as base instructions on the next start/resume.
   assert.equal(readCodexBaseInstructions(agentDir), updated);
   globalThis.fetch = async () => { throw new Error("offline"); };

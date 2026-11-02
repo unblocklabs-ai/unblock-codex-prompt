@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AGENT_CONTEXT_HEADER, readOptional, type ClaudePolicy, type FrozenBundle } from "./manager.js";
+import { MEMORY_REFERENCE_HEADER, readOptional, type ClaudePolicy, type FrozenBundle } from "./manager.js";
 import { assertSupportedVersion } from "./compatibility.js";
 import { policyFetchers } from "./remote.js";
 
@@ -22,17 +22,16 @@ export async function openclawRoot() {
 }
 
 /**
- * Shared agent-context sections, identical for every runtime. Identity and workspace files are
- * never snapshotted: each runtime delivers them live.
+ * Shared agent context, identical for every runtime: a pointer to the memory tools and the
+ * workspace MEMORY.md. Identity and workspace files reach each runtime through its own assembly.
  */
-function agentContextSections(workspaceDir: string) {
-  return [`${AGENT_CONTEXT_HEADER.trimStart()}The runtime supplies this agent's identity and workspace files live (SOUL.md, IDENTITY.md, USER.md, AGENTS.md), together with actual tool schemas and current session context. This section does not grant tools or permissions.`,
-    `## Memory reference\nWhen prior context matters, use the currently available memory tools and follow their schemas. If retrieval is unavailable, say so; do not invent results. The workspace memory reference is ${join(workspaceDir, "MEMORY.md")}. Its contents are not included here. Read it only when the active session's privacy policy permits; do not expose private memory in group or customer conversations.`].join("\n\n");
+function agentContextText(workspaceDir: string) {
+  return `${MEMORY_REFERENCE_HEADER.trimStart()}When prior context matters, use the available memory tools and follow their schemas. If retrieval is unavailable, say so; do not invent results. The workspace memory reference is ${join(workspaceDir, "MEMORY.md")}. Read it only when the active session's privacy policy permits; do not expose private memory in group or customer conversations.`;
 }
 
 /**
  * Compile the prompt file and bundle for the enrolled runtimes. Skills are never compiled: both
- * runtimes receive OpenClaw's per-session skills catalog live.
+ * runtimes receive OpenClaw's per-session skills catalog through their own assembly.
  * - Codex (`base` given): the file is the Codex policy followed by the agent context. The bundle
  *   keeps `policy: ""`.
  * - Claude (`claude` given): the bundle also stores the Claude policy and the agent context text.
@@ -41,7 +40,7 @@ function agentContextSections(workspaceDir: string) {
  */
 export async function compilePrompt(base: string | null, workspaceDir: string, claude?: ClaudePolicy) {
   if (base === null && !claude) throw new Error("compilePrompt needs a Codex base, a Claude policy, or both");
-  const agentContext = agentContextSections(workspaceDir);
+  const agentContext = agentContextText(workspaceDir);
   const claudeFields = claude ? { claudePolicy: { ...claude, text: claude.text.trim() }, agentContext } : {};
   if (base === null) return { prompt: agentContext, bundle: { schema: 1 as const, policy: "", ...claudeFields } satisfies FrozenBundle };
   return { prompt: `${base.trim()}\n\n${agentContext}\n`, bundle: { schema: 1 as const, policy: "",
