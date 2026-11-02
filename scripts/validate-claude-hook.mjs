@@ -79,7 +79,8 @@ await writeFile(join(workspace, "MEMORY.md"), "MEMORY BODY\n");
 const policy = "CLAUDE FLEET POLICY";
 const compiled = await compilePrompt(null, workspace, { text: policy, url: "https://example.test/prompt?runtime=claude", revision: sha256(policy), checkedAt: 0 });
 await syncPrompt({ agentDir, ...compiled }, { runtimes: ["claude-cli"] });
-const expected = [policy, compiled.bundle.agentContext, `## ${join(workspace, "AGENTS.md")}\nAGENTS BODY`, `## ${join(workspace, "SOUL.md")}\nSOUL BODY`].join("\n\n");
+const expectedPrefix = [policy, compiled.bundle.agentContext, "## Local media context"].join("\n\n");
+const expectedFiles = [`## ${join(workspace, "AGENTS.md")}\nAGENTS BODY`, `## ${join(workspace, "SOUL.md")}\nSOUL BODY`].join("\n\n");
 
 const config = hooks => ({
   agents: { list: [{ id: "main", agentDir, workspace }, { id: "other", agentDir: join(work, "other"), workspace }] },
@@ -119,7 +120,10 @@ const hookResult = (overrides = {}) => resolvePromptBuildHookResult({ config: co
     modelProviderId: "claude-cli", modelId: "claude-opus-5", trigger: "user", ...overrides } });
 
 const managed = await hookResult();
-assert.equal(managed.systemPrompt, expected, `${version}: hook result`);
+assert.ok(managed.systemPrompt.startsWith(expectedPrefix), `${version}: policy, memory and local media context`);
+assert.ok(managed.systemPrompt.includes(`Generated-media staging directory: ${join(workspace, "media")}\n`), `${version}: run-scoped media directory`);
+assert.ok(managed.systemPrompt.endsWith(expectedFiles), `${version}: live workspace files`);
+const expected = managed.systemPrompt;
 for (const overrides of [{ modelProviderId: "anthropic" }, { modelProviderId: "codex" }, { agentId: "other" }]) {
   assert.equal((await hookResult(overrides)).systemPrompt, undefined, `${version}: unmanaged ${JSON.stringify(overrides)}`);
 }

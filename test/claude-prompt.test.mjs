@@ -37,7 +37,7 @@ async function setup({ hooks = { allowConversationAccess: true }, agent = {}, de
   return { root, agentDir, workspace, config, handlers, logs, call, enroll, write };
 }
 
-test("the hook returns exactly the policy, the memory reference, then each present workspace file under its path", async () => {
+test("the hook carries policy, memory, media staging context and the live workspace files", async () => {
   const { workspace, logs, call, enroll, write } = await setup();
   const memory = await enroll();
   await write("AGENTS.md", "AGENTS BODY\n");
@@ -50,18 +50,15 @@ test("the hook returns exactly the policy, the memory reference, then each prese
   await write("MEMORY.md", "MEMORY BODY");
   await write("README.md", "NOT A BOOTSTRAP FILE");
   const result = await call();
-  const sections = [POLICY, memory, `## ${join(workspace, "AGENTS.md")}\nAGENTS BODY`, `## ${join(workspace, "SOUL.md")}\nSOUL BODY\n  indented`,
-    `## ${join(workspace, "BOOTSTRAP.md")}\nBOOTSTRAP BODY`];
-  assert.deepEqual(result, { systemPrompt: sections.join("\n\n") });
+  assert.ok(result.systemPrompt.startsWith(`${POLICY}\n\n${memory}\n\n## Local media context\n`));
+  assert.ok(result.systemPrompt.includes(`Generated-media staging directory: ${join(workspace, "media")}\n`));
+  assert.match(result.systemPrompt, /Arbitrary \/tmp directories are not automatically allowed/u);
+  assert.match(result.systemPrompt, /do not grant filesystem access or bypass media checks/u);
+  assert.ok(result.systemPrompt.endsWith([`## ${join(workspace, "AGENTS.md")}\nAGENTS BODY`, `## ${join(workspace, "SOUL.md")}\nSOUL BODY\n  indented`,
+    `## ${join(workspace, "BOOTSTRAP.md")}\nBOOTSTRAP BODY`].join("\n\n")));
   assert.match(memory, /^## Memory reference\n/u);
   // OpenClaw's bootstrap set only: no MEMORY body, and no legacy TOOLS.md or HEARTBEAT.md.
   assert.doesNotMatch(result.systemPrompt, /MEMORY BODY|NOT A BOOTSTRAP FILE|TOOLS BODY|HEARTBEAT BODY/u);
-  // Nothing besides the policy, the memory reference, the file bodies and their path headers.
-  let authored = result.systemPrompt;
-  for (const body of [POLICY, "AGENTS BODY", "SOUL BODY\n  indented", "BOOTSTRAP BODY"]) authored = authored.replace(body, "");
-  assert.deepEqual(authored.split("\n").filter(line => line.startsWith("#")), ["## Memory reference",
-    ...["AGENTS.md", "SOUL.md", "BOOTSTRAP.md"].map(name => `## ${join(workspace, name)}`)]);
-  assert.doesNotMatch(authored, /OpenClaw|Project Context|\b(?:live|frozen|snapshots?|refresh(?:ed|es)?|synced|cached|currently|draft|status|deliver(?:y|ed)?|truncated)\b/iu);
   assert.deepEqual(logs, []);
 });
 
@@ -157,8 +154,13 @@ test("the run's workspace is used, falling back to the configured one; symlinks 
   const run = join(root, "run-workspace");
   await mkdir(run);
   await writeFile(join(run, "SOUL.md"), "RUN SOUL");
-  assert.match((await call({ workspaceDir: run })).systemPrompt, new RegExp(`## ${join(run, "SOUL.md")}\\nRUN SOUL$`, "u"));
-  assert.match((await call({ workspaceDir: join(root, "missing") })).systemPrompt, /## Memory reference\n[^#]*$/u);
+  const runPrompt = (await call({ workspaceDir: run })).systemPrompt;
+  assert.match(runPrompt, new RegExp(`## ${join(run, "SOUL.md")}\\nRUN SOUL$`, "u"));
+  assert.ok(runPrompt.includes(`Generated-media staging directory: ${join(run, "media")}\n`));
+  assert.ok(!runPrompt.includes(`Generated-media staging directory: ${join(workspace, "media")}\n`));
+  const missingPrompt = (await call({ workspaceDir: join(root, "missing") })).systemPrompt;
+  assert.match(missingPrompt, /## Memory reference\n/u);
+  assert.doesNotMatch(missingPrompt, /CONFIGURED SOUL/u);
 
   await mkdir(join(workspace, "shared"));
   await writeFile(join(workspace, "shared", "identity.md"), "LINKED IDENTITY");

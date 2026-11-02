@@ -1,6 +1,23 @@
 # Validation
 
-## Claude CLI prompt through `before_prompt_build`, no core patch — 2026-11-02 (unreleased, 0.5.0)
+## Claude local media context — 2026-11-02 (0.5.1)
+
+- The Claude hook names `<run-workspace>/media` as the staging directory for generated
+  files that OpenClaw must view or send. It follows the run workspace, including
+  subagent workspaces, without creating directories or widening media roots.
+- iMessage attachment forwarding remains an operator setting, not a side effect of
+  enrollment. The README documents `includeAttachments`, its false default, named
+  accounts, and restarting the watcher before verifying an incoming image.
+- The hook's media-context and run-workspace regressions fail against the 0.5.0
+  renderer, then pass after the change. `npm run preflight`: 85 tests passed, both
+  Plugin Inspector checks passed (two inspector proof gaps, no live issues), package
+  validation passed. `npm run release:check -- v0.5.1` passed.
+- The packed candidate's real hook/turn-context validation passed against installed
+  OpenClaw 2026.10.6 and 2026.10.8, as well as the 2026.10.9 development dependency.
+  This checks assembled context, not model obedience or iMessage ingress.
+- No Codex adapter, shared fleet policy, model, authentication or permission changes.
+
+## Claude CLI prompt through `before_prompt_build`, no core patch — 2026-11-02 (0.5.0)
 
 - **Owner decision.** Claude is treated like Codex: for the target agent's `claude-cli`
   runs, subagent sessions included, OpenClaw's system prompt is replaced completely.

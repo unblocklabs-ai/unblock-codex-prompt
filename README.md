@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.5.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.5.1.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -138,7 +138,9 @@ appends its model identity line. The prompt is, in order, with nothing else adde
 
 1. the Claude fleet policy (`runtime=claude`), never the Codex policy;
 2. the memory reference (`## Memory reference`);
-3. each of `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md` and `BOOTSTRAP.md` that
+3. local media context naming `<run-workspace>/media` as a generated-media staging
+   directory, rather than an arbitrary `/tmp` directory that media loaders may reject;
+4. each of `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md` and `BOOTSTRAP.md` that
    exists in the run's workspace and is not empty, under a `## <absolute path>` header.
    That is OpenClaw's own workspace bootstrap set without `MEMORY.md`, whose body is
    never included. As in OpenClaw, `BOOTSTRAP.md` goes only to primary user or manual
@@ -159,6 +161,29 @@ The policy and memory reference come from the sync receipt, verified on every ca
 error, without prompt text, and that run keeps OpenClaw's own prompt. Other agents,
 other providers, and paused or never-enrolled agents are left alone. When the hook
 returns nothing, OpenClaw's prompt applies unchanged.
+
+**Attachments and local media.**
+
+The prompt hook does not receive or change channel attachment settings. For iMessage
+nodes that should receive attachments, explicitly enable forwarding:
+
+```sh
+openclaw config set channels.imessage.includeAttachments true --strict-json
+```
+
+For a named iMessage account, set the value under
+`channels.imessage.accounts.<accountId>.includeAttachments` instead. OpenClaw defaults
+this setting to false: without it, an incoming image can be absent from the agent's
+turn even when the file exists in Messages. Restart the Gateway to re-subscribe the
+iMessage watcher, then verify with an incoming image in a permitted conversation.
+The plugin never changes channel settings during installation, sync or refresh.
+
+Claude's local media context is rebuilt from the run's workspace every turn, including
+subagent sessions. It names `<run-workspace>/media` for generated files that OpenClaw
+must view or send; the directory is not created by the prompt hook. Paths returned by
+OpenClaw's media tools remain usable. This does not widen media roots or change file
+permissions. A `path-not-allowed` media error is different from macOS Full Disk Access:
+use a supported staging path rather than granting arbitrary `/tmp` access.
 
 **Skills.** Claude gets the session skills through OpenClaw's native `openclaw-skills`
 Claude plugin mount, which is not part of the system prompt and is kept.
@@ -318,7 +343,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.0.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.1.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -599,7 +624,7 @@ inline in the patch, so it does not depend on the plugin runtime).
 
 ```sh
 npm run preflight
-npm run release:check -- v0.5.0
+npm run release:check -- v0.5.1
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -609,7 +634,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.0 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.1 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

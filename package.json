@@ -1,6 +1,6 @@
 {
   "name": "@unblocklabs/unblock-codex-prompt",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Manage a shared fleet prompt for an OpenClaw agent on Codex and Claude CLI.",
   "type": "module",
   "main": "./dist/index.js",

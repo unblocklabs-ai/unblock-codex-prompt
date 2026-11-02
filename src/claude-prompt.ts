@@ -90,8 +90,8 @@ async function readWorkspaceFile(root: string, path: string, skipped: SkippedFil
 
 /**
  * The complete Claude CLI system prompt for the managed agent: the Claude policy, the memory
- * reference, then each present, non-empty workspace file under its absolute path. Files are read
- * on every call, so an edit applies to the next turn. Nothing else is added.
+ * reference, local media context, then each present, non-empty workspace file under its absolute
+ * path. Files and the run's workspace are resolved on every call.
  */
 export async function buildClaudeSystemPrompt(managed: ClaudeManagedContext, workspaceDir: string, maxChars: number,
   options: { totalMaxChars?: number; includeBootstrap?: boolean } = {}) {
@@ -100,7 +100,10 @@ export async function buildClaudeSystemPrompt(managed: ClaudeManagedContext, wor
   const skipped: SkippedFile[] = [];
   let root: string | null;
   try { root = await realpath(workspace); } catch (error) { if (!isMissing(error)) throw error; root = null; }
-  const sections = [managed.policy, managed.agentContext];
+  // OpenClaw's agent-scoped media roots include the run's workspace. Keep a concrete staging
+  // path when replacing the host prompt; an arbitrary task directory under /tmp is not a media root.
+  const mediaContext = `## Local media context\nGenerated-media staging directory: ${join(workspace, "media")}\nFor generated images or files that OpenClaw must view or send, use this directory or paths returned by OpenClaw media tools. Arbitrary /tmp directories are not automatically allowed by media loaders. These path hints do not grant filesystem access or bypass media checks.`;
+  const sections = [managed.policy, managed.agentContext, mediaContext];
   if (root !== null) {
     for (const name of CLAUDE_WORKSPACE_FILES) {
       if (name === "BOOTSTRAP.md" && options.includeBootstrap === false) continue;
