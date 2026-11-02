@@ -5,22 +5,13 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { adapterStatus, applyAdapterRestore, codexAdapterOwnership, installAdapter, planAdapterRestore, prepareAdapter } from "../dist/adapter.js";
-import { applyClaudeRestore, claudeAdapterOwnership, claudeAdapterStatus, installClaudeAdapter, planClaudeRestore, prepareClaudeAdapter } from "../dist/claude-adapter.js";
+import { applyClaudeRestore, claudeAdapterOwnership, claudeAdapterStatus, planClaudeRestore } from "../dist/claude-adapter.js";
+import { installLegacyClaudePatch, legacyCore } from "./helpers/legacy-claude.mjs";
 
-// The same ownership and restore scenarios against both adapters: one shared rule set.
+// Ownership and restore scenarios of the shared patched-file lifecycle: the Codex adapter installs
+// through it, and the same rules remove a 0.4 Claude CLI core patch.
 const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
 const codexBundles = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8")).bundles;
-const claudeFunctions = JSON.parse(await readFile(new URL("./fixtures/claude-assembly.json", import.meta.url), "utf8")).functions;
-
-function claudeChunks(tag) {
-  const f = claudeFunctions;
-  return {
-    [`helpers-${tag}.mjs`]: `import { t as buildConfiguredAgentSystemPrompt } from "./system-prompt-config-${tag}.mjs";\n${f.buildCliAgentSystemPrompt}\nexport { buildCliAgentSystemPrompt as t };\n`,
-    [`system-prompt-config-${tag}.mjs`]: `import { n as buildAgentSystemPrompt } from "./system-prompt-${tag}.mjs";\n${f.buildConfiguredAgentSystemPrompt}\nexport { buildConfiguredAgentSystemPrompt as t };\n`,
-    [`system-prompt-${tag}.mjs`]: `${f.buildAgentSystemPrompt}\nexport { buildAgentSystemPrompt as n };\n`,
-    [`unrelated-${tag}.mjs`]: "export const unrelated = true;\n",
-  };
-}
 
 async function writeTree(dist, files) {
   await mkdir(dist, { recursive: true });
@@ -47,22 +38,6 @@ const adapters = {
     plan: planAdapterRestore,
     apply: applyAdapterRestore,
     backupPath: (agentDir, path) => join(agentDir, "codex-home", ".unblock-codex-prompt-adapter-original-" + basename(path)),
-  },
-  claude: {
-    version: "2026.10.6", updatedVersion: "2026.10.9",
-    async create(root, { version = this.version, tag = "test" } = {}) {
-      await mkdir(join(root, "dist"), { recursive: true });
-      await writeFile(join(root, "package.json"), JSON.stringify({ name: "openclaw", version }));
-      await writeTree(join(root, "dist"), claudeChunks(tag));
-    },
-    setVersion: (root, version) => writeFile(join(root, "package.json"), JSON.stringify({ name: "openclaw", version })),
-    prepare: (agentDir, root) => prepareClaudeAdapter(agentDir, "main", runtimePath, root),
-    install: installClaudeAdapter,
-    ownership: claudeAdapterOwnership,
-    state: async agentDir => (await claudeAdapterStatus(agentDir)).state,
-    plan: planClaudeRestore,
-    apply: applyClaudeRestore,
-    backupPath: (agentDir, path) => join(agentDir, "codex-home", ".unblock-claude-prompt-adapter-original-" + basename(path)),
   },
 };
 
@@ -197,11 +172,8 @@ const expected = {
 };
 
 for (const [name, scenario] of Object.entries(scenarios)) {
-  test(`both adapters, same outcome: ${name}`, async () => {
-    const codex = await scenario(adapters.codex);
-    const claude = await scenario(adapters.claude);
-    assert.deepEqual(codex, claude);
-    assert.deepEqual(codex, expected[name]);
+  test(`Codex adapter lifecycle: ${name}`, async () => {
+    assert.deepEqual(await scenario(adapters.codex), expected[name]);
   });
 }
 
@@ -231,20 +203,68 @@ test("a 0.3 Codex receipt without a version lets a sync proceed once an update r
   await assert.rejects(codex.prepare(sameName.agentDir, sameName.root), /another writer/);
 });
 
-test("deleting the old OpenClaw root lets a Claude sync against a new root proceed", async () => {
-  const claude = adapters.claude;
-  const { work, agentDir, root } = await installed(claude);
-  // A Node upgrade reinstalled OpenClaw elsewhere and the old directory was removed unrestored.
-  await rm(root, { recursive: true });
-  assert.equal(await claudeAdapterOwnership(agentDir), "superseded");
-  assert.deepEqual(await claude.plan(agentDir), { ownership: "superseded", files: [], superseded: [] });
-  const moved = join(work, "moved");
-  await claude.create(moved);
-  const original = await readTree(join(moved, "dist"));
-  // Same chunk names: the old receipt's backups are replaced, not refused as foreign.
-  await claude.install(agentDir, await claude.prepare(agentDir, moved));
-  assert.equal((await claudeAdapterStatus(agentDir)).openclawRoot, moved);
-  assert.deepEqual(await observe(claude, agentDir), { ownership: "patched", state: "patched" });
-  await claude.apply(await claude.plan(agentDir));
-  assert.deepEqual(await readTree(join(moved, "dist")), original);
+/** A 0.4 Claude core patch for a fresh agent. */
+async function legacyInstalled() {
+  const work = await mkdtemp(join(await realpath(tmpdir()), "legacy-claude-"));
+  const agentDir = join(work, "agent");
+  const root = await legacyCore(join(work, "core"));
+  const original = await readTree(join(root, "dist"));
+  const { files } = await installLegacyClaudePatch(agentDir, root);
+  return { work, agentDir, root, original, files };
+}
+const legacyObserve = async agentDir => ({ ownership: await claudeAdapterOwnership(agentDir), state: (await claudeAdapterStatus(agentDir)).state,
+  leftover: (await claudeAdapterStatus(agentDir)).leftover });
+
+test("0.4 Claude core patch: a clean or partial restore returns the exact original bytes", async () => {
+  for (const partial of [false, true]) {
+    const { agentDir, root, original, files } = await legacyInstalled();
+    if (partial) await writeFile(files[0].path, files[0].original);
+    assert.deepEqual(await legacyObserve(agentDir), { ownership: "patched", state: partial ? "partial" : "patched", leftover: true });
+    const plan = await planClaudeRestore(agentDir);
+    assert.equal(plan.files.length, partial ? 1 : 2);
+    assert.deepEqual(await applyClaudeRestore(plan), { ownership: "patched", files: plan.files.map(file => file.path), superseded: [], restartRequired: true });
+    assert.deepEqual(await readTree(join(root, "dist")), original);
+    assert.deepEqual(await legacyObserve(agentDir), { ownership: "restored", state: "original", leftover: false });
+    assert.equal((await planClaudeRestore(agentDir)).files.length, 0);
+  }
+});
+
+test("0.4 Claude core patch: updates supersede it and the updater's files are left alone", async () => {
+  // Renamed bundles: nothing of the patch is left.
+  const renamed = await legacyInstalled();
+  for (const name of await readdir(join(renamed.root, "dist"))) await rm(join(renamed.root, "dist", name));
+  await legacyCore(renamed.root, { version: "2026.10.9", tag: "next" });
+  const updated = await readTree(join(renamed.root, "dist"));
+  assert.deepEqual(await legacyObserve(renamed.agentDir), { ownership: "superseded", state: "missing", leftover: false });
+  assert.deepEqual(await planClaudeRestore(renamed.agentDir), { ownership: "superseded", files: [], superseded: [] });
+  assert.deepEqual(await readTree(join(renamed.root, "dist")), updated);
+
+  // A version change that replaced only one patched file: the other is still restored.
+  const some = await legacyInstalled();
+  await writeFile(some.files[0].path, some.files[0].original + "\n// updated\n");
+  await writeFile(join(some.root, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.10.9" }));
+  assert.deepEqual(await legacyObserve(some.agentDir), { ownership: "patched", state: "changed", leftover: true });
+  const plan = await planClaudeRestore(some.agentDir);
+  assert.deepEqual([plan.files.map(file => file.path), plan.superseded], [[some.files[1].path], [some.files[0].path]]);
+  await applyClaudeRestore(plan);
+  assert.equal(await readFile(some.files[0].path, "utf8"), some.files[0].original + "\n// updated\n");
+  assert.equal(await readFile(some.files[1].path, "utf8"), some.files[1].original);
+
+  // The OpenClaw directory was deleted (reinstalled elsewhere).
+  const deleted = await legacyInstalled();
+  await rm(deleted.root, { recursive: true });
+  assert.equal(await claudeAdapterOwnership(deleted.agentDir), "superseded");
+  assert.deepEqual(await planClaudeRestore(deleted.agentDir), { ownership: "superseded", files: [], superseded: [] });
+});
+
+test("0.4 Claude core patch: a same-version foreign edit or an invalid backup is refused before any write", async () => {
+  const foreign = await legacyInstalled();
+  await writeFile(foreign.files[0].path, foreign.files[0].patched + "\n// someone else\n");
+  const edited = await readTree(join(foreign.root, "dist"));
+  assert.equal(await refusal(planClaudeRestore(foreign.agentDir)), "foreign edit");
+  assert.deepEqual(await readTree(join(foreign.root, "dist")), edited);
+
+  const backup = await legacyInstalled();
+  await writeFile(join(backup.agentDir, "codex-home", ".unblock-claude-prompt-adapter-original-" + basename(backup.files[1].path)), "someone else's backup");
+  await assert.rejects(planClaudeRestore(backup.agentDir), /Claude adapter backup invalid/);
 });

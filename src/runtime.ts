@@ -27,7 +27,10 @@ function readEnrollment(home: string) {
 
 /** The compiled snapshot, verified against its sync receipt. */
 function readVerifiedSnapshot(home: string) {
-  const bundle: unknown = JSON.parse(readPrivate(join(home, ".unblock-codex-prompt-bundle.json")));
+  let bundle: unknown;
+  // A parse error would quote the start of the file; never let bundle text reach a log.
+  try { bundle = JSON.parse(readPrivate(join(home, ".unblock-codex-prompt-bundle.json"))); }
+  catch (error) { if (error instanceof SyntaxError) throw new Error("Frozen bundle missing or invalid; run codex-prompt sync"); throw error; }
   if (!bundle || typeof bundle !== "object" || !("schema" in bundle) || bundle.schema !== 1 ||
       !("policy" in bundle) || typeof bundle.policy !== "string" || !("promptSha256" in bundle)) throw new Error("Frozen bundle missing or invalid; run codex-prompt sync");
   const prompt = readPrivate(join(home, "unblock-codex-prompt.md"));
@@ -66,53 +69,22 @@ export function readCodexBaseInstructions(agentDir: string): string | null {
   return readCodexSnapshot(agentDir)?.prompt ?? null;
 }
 
-export type ClaudeManagedPrompt = { prompt: string; sha256: string };
+export type ClaudeManagedContext = { policy: string; agentContext: string };
 
 /**
- * Called from the reviewed OpenClaw CLI prompt assembly. Returns null while management is
- * paused (restored); throws, aborting the run, when enrolled state is missing, invalid or
- * tampered. The prompt is the Claude policy followed by the shared agent context, both read from
- * the bundle: it never touches the Codex policy (the prompt-file prefix). Skills reach Claude live,
- * through OpenClaw's native skills mount or the session skills prompt. The bundle is the trust
- * root, and readVerifiedSnapshot checks the prompt file against its promptSha256.
+ * The Claude policy and the shared agent context (memory reference), both read from the bundle,
+ * for the Claude CLI prompt hook. Null unless this agent has an active enrollment that includes
+ * Claude CLI (never enrolled, paused by restore, or Codex only). Throws when that enrolled state
+ * is invalid or tampered: the bundle is the trust root, and readVerifiedSnapshot checks the prompt
+ * file against its promptSha256. It never touches the Codex policy (the prompt-file prefix).
  */
-export function readClaudeManagedPrompt(agentDir: string): ClaudeManagedPrompt | null {
+export function readClaudeManagedContext(agentDir: string): ClaudeManagedContext | null {
   const home = join(agentDir, "codex-home");
   const state = readEnrollment(home);
-  if (!state) throw new Error("Claude bridge installed without enrollment; restore or run codex-prompt sync");
-  if (!state.active) return null;
-  if (!state.runtimes.includes("claude-cli")) throw new Error("Claude bridge installed without Claude CLI enrollment; restore or run codex-prompt sync");
+  if (!state?.active || !state.runtimes.includes("claude-cli")) return null;
   const { bundle } = readVerifiedSnapshot(home);
   const claudePolicy = parseClaudePolicy("claudePolicy" in bundle ? bundle.claudePolicy : undefined);
   const agentContext = "agentContext" in bundle ? bundle.agentContext : undefined;
   if (typeof agentContext !== "string" || !agentContext.trim()) throw new Error("Claude policy missing or invalid; run codex-prompt sync");
-  const managed = `${claudePolicy.text}\n\n${agentContext}`;
-  return { prompt: managed, sha256: sha256(managed) };
-}
-
-/** OpenClaw's generic CLI identity line; its presence means the managed assembly was lost. */
-export const GENERIC_CLI_POLICY_MARKER = "You are a personal assistant running inside OpenClaw.";
-
-export type ClaudeAdoption = { outcome: "unmanaged" } | { outcome: "pass" } | { outcome: "block"; reason: string };
-
-/**
- * Final-adoption check for an enrolled Claude CLI run. Never-enrolled and restored agents
- * stay upstream. Prompt text is compared only; it is never returned or logged.
- */
-export function checkClaudeAdoption(agentDir: string, systemPrompt: string | undefined): ClaudeAdoption {
-  const home = join(agentDir, "codex-home");
-  let state;
-  try { state = readEnrollment(home); } catch { return { outcome: "block", reason: "Managed enrollment state is invalid; inspect codex-prompt status" }; }
-  if (!state?.active || !state.runtimes.includes("claude-cli")) return { outcome: "unmanaged" };
-  let managed;
-  try { managed = readClaudeManagedPrompt(agentDir); } catch { return { outcome: "block", reason: "Managed snapshot is invalid or changed outside sync; run codex-prompt sync" }; }
-  if (!managed) return { outcome: "unmanaged" };
-  if (typeof systemPrompt !== "string") return { outcome: "block", reason: "The final system prompt is unavailable to verify managed policy" };
-  if (systemPrompt.includes(GENERIC_CLI_POLICY_MARKER)) {
-    return { outcome: "block", reason: "Generic OpenClaw policy is present: the Claude assembly patch is missing or inactive; restore, re-sync and restart the Gateway" };
-  }
-  if (!systemPrompt.includes(managed.prompt)) {
-    return { outcome: "block", reason: "Managed policy was replaced or altered after assembly, for example by a prompt hook or registered text transform; review those plugins" };
-  }
-  return { outcome: "pass" };
+  return { policy: claudePolicy.text.trim(), agentContext: agentContext.trim() };
 }

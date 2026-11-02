@@ -94,7 +94,7 @@ function sortRuntimes(runtimes: readonly ManagedRuntime[]) { return RUNTIMES.fil
 /**
  * Schema 1 is the format 0.3.x reads (it checks only schema, active and previousPointer).
  * Every state 0.3.x can safely act on uses it: Codex enrollments (with Claude too, 0.3.x keeps
- * managing Codex while the feature-detected Claude patch falls back upstream) and paused ones.
+ * managing Codex and registers no Claude prompt hook, so Claude falls back upstream) and paused ones.
  * Active Claude-only enrollment is schema 2, which 0.3.x refuses rather than mismanaging it.
  * Codex-only enrollment omits runtimes: exactly the 0.3.x shape.
  */
@@ -172,7 +172,7 @@ export async function withLock<T>(target: PromptTarget, operation: () => Promise
 
 export const ACTIVATION: Record<ManagedRuntime, string> = {
   codex: "Restart the managed app-server and use a new Codex session; existing threads may retain old instructions.",
-  "claude-cli": "Restart the Gateway to load the patched OpenClaw core. The next Claude CLI process receives the managed prompt; it may resume the existing conversation, whose earlier history is not cleaned.",
+  "claude-cli": "No restart is needed once the Gateway has loaded this plugin version: the plugin builds the Claude CLI prompt on every turn, so the target agent's next Claude turn uses it. A plugin install or update needs a Gateway restart to load the plugin. The new prompt starts a new Claude CLI process that may resume the existing conversation, whose earlier history is not cleaned.",
 };
 
 export async function syncPrompt(target: PromptTarget, options: { adopt?: boolean; automatic?: boolean; runtimes?: readonly ManagedRuntime[] } = {}) {
@@ -287,7 +287,7 @@ export async function refreshSharedPrompt(agentDir: string, fetchers: { codex?: 
     }
     const claudeChanged = claudePolicy !== undefined && claudePolicy.text !== previousClaude?.text;
     // Codex's reviewed bridge resends the base file as each thread's base instructions, so a change
-    // re-syncs existing threads on their next turn; Claude starts its next CLI process with its policy.
+    // re-syncs existing threads on their next turn; Claude's prompt hook reads the policy every turn.
     return { changed: changed || claudeChanged, checkedAt: now,
       ...codexRemote ? { revision: codexRemote.source.revision, nextCodexTurn: changed } : {},
       ...claudeRemote ? { claudeRevision: claudeRemote.source.revision, nextClaudeProcess: claudeChanged } : {} };

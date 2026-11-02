@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
-import { managedTargetSource } from "../dist/managed-target.js";
+import { isManagedTarget, managedTargetSource } from "../dist/managed-target.js";
 
 // The gates each bridge inlined before they shared one generated predicate (0.4 pre-release).
 const previousCodex = `function previous(params) {
@@ -27,7 +27,7 @@ const previousClaude = `function previous(params) {
 const eligible = 'typeof params.modelDisplay === "string" && params.modelDisplay.startsWith("claude-cli/")';
 const outcome = fn => { try { return { value: fn() }; } catch (error) { return { error: error.message }; } };
 
-test("the shared managed-target predicate behaves exactly like each bridge's previous inline gate", () => {
+test("the generated managed-target predicate behaves exactly like each bridge's previous inline gate", () => {
   const codex = vm.runInNewContext(`${managedTargetSource({ name: "gate", agentId: "main", targetChanged: "Frozen bridge target changed; restore and reinstall the adapter" })}
     ${previousCodex}; ({ current: params => gate(params) ? "" : null, previous })`);
   const claude = vm.runInNewContext(`${managedTargetSource({ name: "gate", agentId: "main", targetChanged: "Claude bridge target changed; restore and re-sync", eligible })}
@@ -50,4 +50,23 @@ test("the shared managed-target predicate behaves exactly like each bridge's pre
   assert.throws(() => codex.current(retargeted), /Frozen bridge target changed/);
   assert.equal(claude.current({ ...retargeted, modelDisplay: "anthropic/claude-opus-5" }), undefined);
   assert.throws(() => claude.current({ ...retargeted, modelDisplay: "claude-cli/claude-opus-5" }), /Claude bridge target changed/);
+});
+
+test("the Claude prompt hook's managed-target predicate keeps the inline gate's semantics", () => {
+  // Managed means the previous gate managed the run, or found the configured target and refused it
+  // only because the installed bridge was for another agent; the hook reads that target's enrollment.
+  const previous = vm.runInNewContext(`${previousCodex}; previous`);
+  const entries = [undefined, { enabled: false, config: { frozenContext: true } }, { enabled: true }, { enabled: true, config: { frozenContext: false } },
+    { enabled: true, config: { frozenContext: true } }, { enabled: true, config: { frozenContext: true, agentId: "main" } },
+    { enabled: true, config: { frozenContext: true, agentId: "other" } }, { enabled: true, config: { frozenContext: true, agentId: 7 } }];
+  let cases = 0;
+  for (const entry of entries) for (const base of [undefined, {}, { enabled: false }, { allow: ["unblock-codex-prompt"] }, { allow: ["something-else"] }, { allow: "not-a-list" }])
+    for (const agentId of ["main", "other", undefined]) {
+      const plugins = base === undefined ? (entry ? { entries: { "unblock-codex-prompt": entry } } : undefined) : { ...base, entries: { "unblock-codex-prompt": entry } };
+      const config = plugins === undefined ? {} : { plugins };
+      const gate = outcome(() => previous({ config, agentId }));
+      assert.equal(isManagedTarget(config, agentId), gate.value === "" || /target changed/u.test(gate.error ?? ""), JSON.stringify({ config, agentId }));
+      cases++;
+    }
+  assert.ok(cases > 100);
 });

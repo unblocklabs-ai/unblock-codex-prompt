@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import plugin from "../dist/index.js";
 import { compilePrompt } from "../dist/compiler.js";
 import { readEnrollment, refreshSharedPrompt, restorePrompt, sha256, syncPrompt } from "../dist/manager.js";
-import { checkClaudeAdoption, readClaudeManagedPrompt, readFrozenPolicy } from "../dist/runtime.js";
+import { readClaudeManagedContext, readFrozenPolicy } from "../dist/runtime.js";
 import { configuredModelRefs, detectConfiguredRuntimes } from "../dist/runtimes.js";
 import { readPromptPointer } from "../dist/toml.js";
 
@@ -34,18 +34,19 @@ test("Claude-only enrollment writes no Codex configuration and refreshes/restore
   assert.equal((await readdir(home)).includes("config.toml"), false);
   assert.deepEqual(JSON.parse(await readFile(join(home, ".unblock-codex-prompt.json"), "utf8")), { schema: 2, active: true, previousPointer: null, runtimes: ["claude-cli"] });
   assert.throws(() => readFrozenPolicy(agentDir), /Codex bridge installed without Codex enrollment/);
-  const managed = readClaudeManagedPrompt(agentDir);
-  assert.match(managed.prompt, /^FLEET POLICY\n\n## Memory reference\n/);
-  // Identity files are live in the host's project context, never in the managed snapshot.
-  assert.doesNotMatch(managed.prompt, /skills catalog|SOUL A/i);
+  const managed = readClaudeManagedContext(agentDir);
+  assert.equal(managed.policy, "FLEET POLICY");
+  assert.match(managed.agentContext, /^## Memory reference\n/);
+  // Workspace files are read by the prompt hook on every turn, never stored with the policy.
+  assert.doesNotMatch(JSON.stringify(managed), /skills catalog|SOUL A/i);
 
   const refreshed = await refreshSharedPrompt(agentDir, { claude: async () => ({ prompt: "FLEET POLICY B", source: { url: "https://example.test/prompt?runtime=claude", revision: sha256("FLEET POLICY B") } }) });
   assert.equal(refreshed.nextClaudeProcess, true);
   assert.equal("newSessionRequired" in refreshed, false);
-  assert.match(readClaudeManagedPrompt(agentDir).prompt, /^FLEET POLICY B\n\n## Memory reference\n/);
+  assert.equal(readClaudeManagedContext(agentDir).policy, "FLEET POLICY B");
 
   await restorePrompt({ agentDir, prompt: "" });
-  assert.equal(readClaudeManagedPrompt(agentDir), null);
+  assert.equal(readClaudeManagedContext(agentDir), null);
   assert.equal((await readdir(home)).includes("config.toml"), false);
 });
 
@@ -67,7 +68,7 @@ test("adding Codex to a Claude enrollment captures its pointer; Codex-only state
   const codexOnly = await mkdtemp(join(await realpath(tmpdir()), "codex-only-"));
   await syncPrompt({ agentDir: codexOnly, ...await compiled(codexOnly, { claude: null, codex: "FLEET POLICY" }) });
   assert.deepEqual(JSON.parse(await readFile(join(codexOnly, "codex-home", ".unblock-codex-prompt.json"), "utf8")), { schema: 1, active: true, previousPointer: null });
-  assert.throws(() => readClaudeManagedPrompt(codexOnly), /without Claude CLI enrollment/);
+  assert.equal(readClaudeManagedContext(codexOnly), null);
 });
 
 test("sync-time detection resolves effective models like OpenClaw and uses its configured-policy resolver", () => {
@@ -91,7 +92,7 @@ test("sync-time detection resolves effective models like OpenClaw and uses its c
   assert.equal(detectConfiguredRuntimes(config, "own", () => { throw new Error("resolver failure"); }).runtimes.size, 0);
 });
 
-test("CLI sync requires a detected runtime and the conversation-access grant before writing state", async t => {
+test("CLI sync requires a detected runtime and a registrable prompt hook before writing state", async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), "claude-cli-sync-"));
   const agentDir = join(root, "agent");
   await mkdir(join(root, "workspace"));
@@ -110,78 +111,11 @@ test("CLI sync requires a detected runtime and the conversation-access grant bef
   t.after(() => { globalThis.fetch = originalFetch; });
   await assert.rejects(run({ ...base, plugins: { entries: { "unblock-codex-prompt": entry } } }), /No managed runtime detected/);
   const resolver = { runtime: { modelConfig: { resolveModelRuntimePolicy: () => ({ policy: { id: "claude-cli" } }) } } };
-  await assert.rejects(run({ ...base, plugins: { entries: { "unblock-codex-prompt": entry } } }, resolver), /hooks.allowConversationAccess: true/);
+  // OpenClaw registers before_prompt_build for a non-bundled plugin only with conversation access.
+  await assert.rejects(run({ ...base, plugins: { entries: { "unblock-codex-prompt": entry } } }, resolver),
+    /Claude CLI management needs its prompt hook: OpenClaw registers [^]*hooks\.allowConversationAccess: true/);
+  // And it blocks prompt-injection hooks when injection is disabled.
+  await assert.rejects(run({ ...base, plugins: { entries: { "unblock-codex-prompt": { ...entry, hooks: { allowConversationAccess: true, allowPromptInjection: false } } } } }, resolver),
+    /hooks\.allowPromptInjection is false, which blocks the before_prompt_build hook[^]*remove it or set it to true/);
   await assert.rejects(readdir(agentDir), /ENOENT/);
-});
-
-test("final-adoption gate passes managed prompts, reports unmanaged runs and blocks broken management", async () => {
-  const agentDir = await mkdtemp(join(await realpath(tmpdir()), "claude-gate-"));
-  const config = { agents: { list: [{ id: "main", agentDir, workspace: agentDir }] }, plugins: { entries: { "unblock-codex-prompt": {
-    enabled: true, hooks: { allowConversationAccess: true }, config: { frozenContext: true, promptUrl: "https://example.test/prompt" } } } } };
-  const hooks = {};
-  const logs = [];
-  plugin.register({ config, registerService() {}, registerCli() {}, logger: { warn: value => logs.push(value), error: value => logs.push(value) },
-    on: (name, handler) => { hooks[name] = handler; } });
-  assert.deepEqual(Object.keys(hooks).sort(), ["before_agent_run", "before_prompt_build"]);
-  let run = 0;
-  // The CLI runner's before_agent_run context carries no provider; preparation marks the run.
-  const gate = (event, prepared = { agentId: "main", modelProviderId: "claude-cli" }) => {
-    const runId = `run-${++run}`;
-    assert.equal(hooks.before_prompt_build({ prompt: "", messages: [] }, { ...prepared, runId }), undefined);
-    return hooks.before_agent_run(event, { agentId: prepared.agentId, runId });
-  };
-  assert.equal(gate({ systemPrompt: "anything" }, { agentId: "main", modelProviderId: "openai" }), undefined);
-  assert.equal(gate({ systemPrompt: "anything" }, { agentId: "other", modelProviderId: "claude-cli" }), undefined);
-  assert.equal(hooks.before_agent_run({ systemPrompt: "anything" }, { agentId: "main", runId: "never-prepared" }), undefined);
-  assert.equal(gate({ systemPrompt: "You are a personal assistant running inside OpenClaw." }), undefined);
-  assert.match(logs.at(-1), /not managed; run openclaw codex-prompt sync/);
-
-  await syncPrompt({ agentDir, ...await compiled(agentDir) }, { runtimes: ["claude-cli"] });
-  const managed = readClaudeManagedPrompt(agentDir).prompt;
-  assert.equal(gate({ systemPrompt: `${managed}\n\n## Runtime\nfacts` }), undefined);
-  assert.match(gate({ systemPrompt: "You are a personal assistant running inside OpenClaw.\n" + managed }).reason, /patch is missing or inactive/);
-  assert.match(gate({ systemPrompt: managed.replace("FLEET POLICY", "FLEET P0LICY") }).reason, /replaced or altered after assembly/);
-  assert.equal(gate({}).outcome, "block");
-  await writeFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "tampered");
-  assert.equal(checkClaudeAdoption(agentDir, managed).outcome, "block");
-  assert.doesNotMatch(logs.join("\n"), /FLEET POLICY/);
-
-  for (const grant of [{}, { allowConversationAccess: true, allowPromptInjection: false }]) {
-    const ungranted = [];
-    plugin.register({ config: { ...config, plugins: { entries: { "unblock-codex-prompt": { ...config.plugins.entries["unblock-codex-prompt"], hooks: grant } } } },
-      registerService() {}, registerCli() {}, on: name => ungranted.push(name) });
-    assert.deepEqual(ungranted, []);
-  }
-});
-
-test("a Claude attempt that fails before execution cannot gate a non-Claude fallback sharing its runId", async () => {
-  const agentDir = await mkdtemp(join(await realpath(tmpdir()), "claude-fallback-"));
-  const config = { agents: { list: [{ id: "main", agentDir, workspace: agentDir }] }, plugins: { entries: { "unblock-codex-prompt": {
-    enabled: true, hooks: { allowConversationAccess: true }, config: { frozenContext: true, promptUrl: "https://example.test/prompt" } } } } };
-  const hooks = {};
-  plugin.register({ config, registerService() {}, registerCli() {}, logger: { warn() {}, error() {} }, on: (name, handler) => { hooks[name] = handler; } });
-  await syncPrompt({ agentDir, ...await compiled(agentDir) }, { runtimes: ["claude-cli"] });
-  const generic = { systemPrompt: "You are a personal assistant running inside OpenClaw." };
-  const prepare = (runId, modelProviderId, agentId = "main") => hooks.before_prompt_build({ prompt: "", messages: [] }, { agentId, runId, modelProviderId });
-  // CLI runner contexts carry no provider; embedded and worker contexts name theirs.
-  const execute = (runId, event, modelProviderId) => hooks.before_agent_run(event, { agentId: "main", runId, ...modelProviderId ? { modelProviderId } : {} });
-
-  // Claude preparation fails (e.g. auth); the embedded fallback prepares and runs under the same runId.
-  prepare("run-a", "claude-cli");
-  prepare("run-a", "openai");
-  assert.equal(execute("run-a", generic, "openai"), undefined);
-  // A fallback that skips prompt-build (exact-prompt or worker paths) is identified by its provider.
-  prepare("run-b", "claude-cli");
-  assert.equal(execute("run-b", {}, "openai"), undefined);
-  assert.equal(execute("run-b", generic), undefined, "the mark was cleared, not left for a later run");
-  // A non-target agent's preparation also clears the mark.
-  prepare("run-c", "claude-cli");
-  prepare("run-c", "claude-cli", "other");
-  assert.equal(execute("run-c", generic), undefined);
-  // Claude after a non-Claude attempt, or with an explicit claude-cli provider, is still gated.
-  prepare("run-d", "openai");
-  prepare("run-d", "claude-cli");
-  assert.equal(execute("run-d", generic).outcome, "block");
-  prepare("run-e", "claude-cli");
-  assert.equal(execute("run-e", generic, "claude-cli").outcome, "block");
 });
