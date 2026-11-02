@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../dist/index.js";
-import { bootstrapMaxChars } from "../dist/claude-prompt.js";
+import { bootstrapMaxChars, includeBootstrap } from "../dist/claude-prompt.js";
 import { compilePrompt } from "../dist/compiler.js";
 import { restorePrompt, sha256, syncPrompt } from "../dist/manager.js";
 
@@ -45,20 +45,22 @@ test("the hook returns exactly the policy, the memory reference, then each prese
   await write("IDENTITY.md", "");
   await write("USER.md", "  \n\t\n");
   await write("TOOLS.md", "TOOLS BODY");
+  await write("HEARTBEAT.md", "HEARTBEAT BODY");
   await write("BOOTSTRAP.md", "BOOTSTRAP BODY");
   await write("MEMORY.md", "MEMORY BODY");
   await write("README.md", "NOT A BOOTSTRAP FILE");
   const result = await call();
   const sections = [POLICY, memory, `## ${join(workspace, "AGENTS.md")}\nAGENTS BODY`, `## ${join(workspace, "SOUL.md")}\nSOUL BODY\n  indented`,
-    `## ${join(workspace, "TOOLS.md")}\nTOOLS BODY`, `## ${join(workspace, "BOOTSTRAP.md")}\nBOOTSTRAP BODY`];
+    `## ${join(workspace, "BOOTSTRAP.md")}\nBOOTSTRAP BODY`];
   assert.deepEqual(result, { systemPrompt: sections.join("\n\n") });
   assert.match(memory, /^## Memory reference\n/u);
-  assert.doesNotMatch(result.systemPrompt, /MEMORY BODY|NOT A BOOTSTRAP FILE/u);
+  // OpenClaw's bootstrap set only: no MEMORY body, and no legacy TOOLS.md or HEARTBEAT.md.
+  assert.doesNotMatch(result.systemPrompt, /MEMORY BODY|NOT A BOOTSTRAP FILE|TOOLS BODY|HEARTBEAT BODY/u);
   // Nothing besides the policy, the memory reference, the file bodies and their path headers.
   let authored = result.systemPrompt;
-  for (const body of [POLICY, "AGENTS BODY", "SOUL BODY\n  indented", "TOOLS BODY", "BOOTSTRAP BODY"]) authored = authored.replace(body, "");
+  for (const body of [POLICY, "AGENTS BODY", "SOUL BODY\n  indented", "BOOTSTRAP BODY"]) authored = authored.replace(body, "");
   assert.deepEqual(authored.split("\n").filter(line => line.startsWith("#")), ["## Memory reference",
-    ...["AGENTS.md", "SOUL.md", "TOOLS.md", "BOOTSTRAP.md"].map(name => `## ${join(workspace, name)}`)]);
+    ...["AGENTS.md", "SOUL.md", "BOOTSTRAP.md"].map(name => `## ${join(workspace, name)}`)]);
   assert.doesNotMatch(authored, /OpenClaw|Project Context|\b(?:live|frozen|snapshots?|refresh(?:ed|es)?|synced|cached|currently|draft|status|deliver(?:y|ed)?|truncated)\b/iu);
   assert.deepEqual(logs, []);
 });
@@ -69,9 +71,9 @@ test("workspace files are read on every call: an edit, a new file and a removal 
   await write("SOUL.md", "SOUL A");
   assert.match((await call()).systemPrompt, /\nSOUL A$/u);
   await write("SOUL.md", "SOUL B");
-  await write("HEARTBEAT.md", "HEARTBEAT");
+  await write("USER.md", "USER B");
   const next = (await call()).systemPrompt;
-  assert.match(next, new RegExp(`\\n## ${join(workspace, "SOUL.md")}\\nSOUL B\\n\\n## ${join(workspace, "HEARTBEAT.md")}\\nHEARTBEAT$`, "u"));
+  assert.match(next, new RegExp(`\\n## ${join(workspace, "SOUL.md")}\\nSOUL B\\n\\n## ${join(workspace, "USER.md")}\\nUSER B$`, "u"));
   assert.doesNotMatch(next, /SOUL A/u);
   await rm(join(workspace, "SOUL.md"));
   assert.doesNotMatch((await call()).systemPrompt, /SOUL/u);
@@ -162,13 +164,13 @@ test("the run's workspace is used, falling back to the configured one; symlinks 
   await writeFile(join(workspace, "shared", "identity.md"), "LINKED IDENTITY");
   await symlink(join(workspace, "shared", "identity.md"), join(workspace, "IDENTITY.md"));
   await writeFile(join(root, "outside.md"), "OUTSIDE");
-  await symlink(join(root, "outside.md"), join(workspace, "TOOLS.md"));
+  await symlink(join(root, "outside.md"), join(workspace, "AGENTS.md"));
   for (let i = 0; i < 2; i++) {
     const prompt = (await call()).systemPrompt;
     assert.match(prompt, new RegExp(`## ${join(workspace, "IDENTITY.md")}\\nLINKED IDENTITY`, "u"));
-    assert.doesNotMatch(prompt, /OUTSIDE|TOOLS\.md/u);
+    assert.doesNotMatch(prompt, /OUTSIDE|AGENTS\.md/u);
   }
-  assert.deepEqual(logs, [`warn unblock-codex-prompt: ${join(workspace, "TOOLS.md")} is left out of the Claude CLI prompt: outside the workspace`]);
+  assert.deepEqual(logs, [`warn unblock-codex-prompt: ${join(workspace, "AGENTS.md")} is left out of the Claude CLI prompt: outside the workspace`]);
 });
 
 test("the hook is registered only when OpenClaw would allow it", async () => {
@@ -178,4 +180,28 @@ test("the hook is registered only when OpenClaw would allow it", async () => {
   for (const hooks of [{ allowConversationAccess: true }, { allowConversationAccess: true, allowPromptInjection: true }]) {
     assert.deepEqual(Object.keys((await setup({ hooks })).handlers), ["before_prompt_build"], JSON.stringify(hooks));
   }
+});
+
+test("BOOTSTRAP.md reaches only primary user or manual runs, and the total budget caps all files", async () => {
+  const { workspace, call, enroll, write } = await setup({ defaults: { bootstrapTotalMaxChars: 30 } });
+  await enroll();
+  await write("BOOTSTRAP.md", "FIRST RUN");
+  assert.match((await call()).systemPrompt, /FIRST RUN/u);
+  assert.match((await call({ trigger: "manual" })).systemPrompt, /FIRST RUN/u);
+  for (const ctx of [{ trigger: "heartbeat" }, { trigger: "cron" }, { sessionKey: "agent:main:subagent:abc" }]) {
+    assert.doesNotMatch((await call(ctx)).systemPrompt, /FIRST RUN|BOOTSTRAP\.md/u, JSON.stringify(ctx));
+  }
+  assert.equal(includeBootstrap({}), true);
+  await write("AGENTS.md", "A".repeat(25));
+  await write("SOUL.md", "S".repeat(25));
+  const prompt = (await call({ trigger: "cron" })).systemPrompt;
+  assert.match(prompt, new RegExp(`## ${join(workspace, "AGENTS.md")}\\nA{25}\\n\\n## ${join(workspace, "SOUL.md")}\\nS{5}$`, "u"));
+});
+
+test("the hook runs ahead of other plugins' prompt hooks", async () => {
+  const { config } = await setup();
+  const registrations = [];
+  plugin.register({ config, registerService() {}, registerCli() {}, logger: { info() {}, warn() {}, error() {} },
+    on: (name, _handler, opts) => registrations.push([name, opts?.priority]) });
+  assert.deepEqual(registrations, [["before_prompt_build", 1000]]);
 });

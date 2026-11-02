@@ -11,12 +11,13 @@
   is the configured target (the managed-target predicate's semantics, now also a runtime
   function), and the enrollment is active and includes Claude CLI. The prompt is the
   Claude policy, the memory reference, then each present, non-empty `AGENTS.md`,
-  `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `BOOTSTRAP.md` from
+  `SOUL.md`, `IDENTITY.md`, `USER.md` and (primary user/manual runs only) `BOOTSTRAP.md` from
   `ctx.workspaceDir` (else the configured workspace) under `## <absolute path>`, read
   every call. Per-file cap: agent `bootstrapMaxChars`, else
   `agents.defaults.bootstrapMaxChars`, else 20000; `USER.md` at most 4000 (OpenClaw's
   `DEFAULT_BOOTSTRAP_MAX_CHARS`/`USER_BOOTSTRAP_MAX_CHARS`, `bootstrap-*.mjs`, identical
-  in 2026.10.6 and 2026.10.9). Invalid or tampered state (enrollment, bundle,
+  in 2026.10.6 and 2026.10.9), plus OpenClaw's total `bootstrapTotalMaxChars` (default
+  60000). The hook registers at priority 1000. Invalid or tampered state (enrollment, bundle,
   prompt-file hash, Claude policy) logs an error without prompt text and returns nothing.
 - **Verified OpenClaw behavior (2026.10.6 and 2026.10.9).** `prepareCliTurnPromptContext`
   replaces the built prompt with a trimmed hook `systemPrompt`, after the backend's

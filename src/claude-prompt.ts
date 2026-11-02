@@ -3,13 +3,22 @@ import { join, resolve, sep } from "node:path";
 import type { ClaudeManagedContext } from "./runtime.js";
 
 /**
- * The agent workspace files the Claude CLI prompt carries, in prompt order. MEMORY.md is not
- * among them: its body stays out of the prompt and the memory reference points to it.
+ * The agent workspace files the Claude CLI prompt carries, in prompt order: OpenClaw's own
+ * workspace bootstrap set (`WORKSPACE_BOOTSTRAP_FILENAMES`) without MEMORY.md, whose body stays out
+ * of the prompt while the memory reference points to it. BOOTSTRAP.md is included only where
+ * OpenClaw would include it: primary interactive runs (see `includeBootstrap`).
  */
-export const CLAUDE_WORKSPACE_FILES = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "BOOTSTRAP.md"] as const;
-/** OpenClaw's per-file bootstrap defaults (2026.10.6 and 2026.10.9 `bootstrap-*.mjs`). */
+export const CLAUDE_WORKSPACE_FILES = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md"] as const;
+/** OpenClaw's bootstrap defaults (2026.10.6 and 2026.10.9 `bootstrap-*.mjs`). */
 export const DEFAULT_BOOTSTRAP_MAX_CHARS = 20_000;
+export const DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 60_000;
 export const USER_BOOTSTRAP_MAX_CHARS = 4_000;
+
+/** OpenClaw shows BOOTSTRAP.md only on primary user/manual runs, never to subagents, heartbeats or cron. */
+export function includeBootstrap(ctx: { trigger?: unknown; sessionKey?: unknown }) {
+  const trigger = typeof ctx.trigger === "string" ? ctx.trigger : "user";
+  return (trigger === "user" || trigger === "manual") && !(typeof ctx.sessionKey === "string" && ctx.sessionKey.includes(":subagent:"));
+}
 // OpenClaw's own read bound for a workspace bootstrap file.
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -29,11 +38,20 @@ function agentEntry(config: unknown, agentId: string) {
  * OpenClaw's per-file cap: the agent's `bootstrapMaxChars`, else `agents.defaults.bootstrapMaxChars`,
  * else 20000. A positive finite number is floored; anything else falls back, as OpenClaw does.
  */
-export function bootstrapMaxChars(config: unknown, agentId: string) {
+function bootstrapLimit(config: unknown, agentId: string, key: "bootstrapMaxChars" | "bootstrapTotalMaxChars", fallback: number) {
   const agents = record(config) ? config.agents : undefined;
   const defaults = record(agents) && record(agents.defaults) ? agents.defaults : undefined;
-  const raw = agentEntry(config, agentId)?.bootstrapMaxChars ?? defaults?.bootstrapMaxChars;
-  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_BOOTSTRAP_MAX_CHARS;
+  const raw = agentEntry(config, agentId)?.[key] ?? defaults?.[key];
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+export function bootstrapMaxChars(config: unknown, agentId: string) {
+  return bootstrapLimit(config, agentId, "bootstrapMaxChars", DEFAULT_BOOTSTRAP_MAX_CHARS);
+}
+
+/** OpenClaw's total budget across all workspace files (default 60000). */
+export function bootstrapTotalMaxChars(config: unknown, agentId: string) {
+  return bootstrapLimit(config, agentId, "bootstrapTotalMaxChars", DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS);
 }
 
 /** Keeps the head of over-long content without splitting a surrogate pair. */
@@ -75,7 +93,9 @@ async function readWorkspaceFile(root: string, path: string, skipped: SkippedFil
  * reference, then each present, non-empty workspace file under its absolute path. Files are read
  * on every call, so an edit applies to the next turn. Nothing else is added.
  */
-export async function buildClaudeSystemPrompt(managed: ClaudeManagedContext, workspaceDir: string, maxChars: number) {
+export async function buildClaudeSystemPrompt(managed: ClaudeManagedContext, workspaceDir: string, maxChars: number,
+  options: { totalMaxChars?: number; includeBootstrap?: boolean } = {}) {
+  let remaining = options.totalMaxChars ?? DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS;
   const workspace = resolve(workspaceDir);
   const skipped: SkippedFile[] = [];
   let root: string | null;
@@ -83,11 +103,15 @@ export async function buildClaudeSystemPrompt(managed: ClaudeManagedContext, wor
   const sections = [managed.policy, managed.agentContext];
   if (root !== null) {
     for (const name of CLAUDE_WORKSPACE_FILES) {
+      if (name === "BOOTSTRAP.md" && options.includeBootstrap === false) continue;
+      if (remaining <= 0) break;
       const path = join(workspace, name);
       // Leading blank lines and trailing whitespace go; indentation is kept.
       const text = (await readWorkspaceFile(root, path, skipped))?.replace(/^(?:[ \t]*\r?\n)+/u, "").trimEnd();
       if (!text?.trim()) continue;
-      sections.push(`## ${path}\n${cap(text, name === "USER.md" ? Math.min(maxChars, USER_BOOTSTRAP_MAX_CHARS) : maxChars)}`);
+      const body = cap(text, Math.min(remaining, name === "USER.md" ? Math.min(maxChars, USER_BOOTSTRAP_MAX_CHARS) : maxChars));
+      remaining -= body.length;
+      sections.push(`## ${path}\n${body}`);
     }
   }
   return { systemPrompt: sections.join("\n\n"), skipped };

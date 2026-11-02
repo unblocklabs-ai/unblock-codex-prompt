@@ -4,7 +4,7 @@ import { parseConfig, PLUGIN_ID } from "./config.js";
 import { promptStatus, readEnrollment, restorePrompt, syncPrompt, refreshSharedPrompt, type Enrollment, type ManagedRuntime } from "./manager.js";
 import { adapterStatus, applyAdapterRestore, codexAdapterOwnership, installAdapter, planAdapterRestore, prepareAdapter } from "./adapter.js";
 import { applyClaudeRestore, claudeAdapterStatus, planClaudeRestore } from "./claude-adapter.js";
-import { bootstrapMaxChars, buildClaudeSystemPrompt } from "./claude-prompt.js";
+import { bootstrapMaxChars, buildClaudeSystemPrompt, bootstrapTotalMaxChars, includeBootstrap } from "./claude-prompt.js";
 import { fetchAndCompile } from "./compiler.js";
 import { managedTargetAgent } from "./managed-target.js";
 import { readClaudeManagedContext, readFrozenPolicy } from "./runtime.js";
@@ -197,7 +197,8 @@ export default definePluginEntry({
           const managed = readClaudeManagedContext(resolveAgentDir(config, agentId));
           if (!managed) return;
           const workspace = typeof ctx.workspaceDir === "string" && isAbsolute(ctx.workspaceDir) ? ctx.workspaceDir : resolveAgentWorkspaceDir(config, agentId);
-          const { systemPrompt, skipped } = await buildClaudeSystemPrompt(managed, workspace, bootstrapMaxChars(config, agentId));
+          const { systemPrompt, skipped } = await buildClaudeSystemPrompt(managed, workspace, bootstrapMaxChars(config, agentId),
+            { totalMaxChars: bootstrapTotalMaxChars(config, agentId), includeBootstrap: includeBootstrap(ctx) });
           for (const { path, reason } of skipped) {
             if (reportedSkips.has(`${path}\0${reason}`)) continue;
             reportedSkips.add(`${path}\0${reason}`);
@@ -208,7 +209,8 @@ export default definePluginEntry({
           api.logger.error(`${PLUGIN_ID}: Claude CLI run for agent ${agentId} uses OpenClaw's prompt: ${errorMessage(error)}`);
           return;
         }
-      });
+        // OpenClaw keeps the first systemPrompt in priority order (higher first): run ahead of other plugins.
+      }, { priority: 1000 });
     }
 
     api.registerCli(({ program, config }) => {

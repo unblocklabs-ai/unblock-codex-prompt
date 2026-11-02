@@ -138,15 +138,19 @@ appends its model identity line. The prompt is, in order, with nothing else adde
 
 1. the Claude fleet policy (`runtime=claude`), never the Codex policy;
 2. the memory reference (`## Memory reference`);
-3. each of `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`
-   and `BOOTSTRAP.md` that exists in the run's workspace and is not empty, under a
-   `## <absolute path>` header. The `MEMORY.md` body is never included.
+3. each of `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md` and `BOOTSTRAP.md` that
+   exists in the run's workspace and is not empty, under a `## <absolute path>` header.
+   That is OpenClaw's own workspace bootstrap set without `MEMORY.md`, whose body is
+   never included. As in OpenClaw, `BOOTSTRAP.md` goes only to primary user or manual
+   runs, never to subagent sessions, heartbeats or cron.
 
 The files are read on every call from the run's workspace (the configured agent
 workspace when the run names none), so an edit applies to the next turn. Each file is
 cut to OpenClaw's per-file bootstrap cap: the agent's `bootstrapMaxChars`, else
 `agents.defaults.bootstrapMaxChars`, else OpenClaw's default of 20000 characters, and at
-most 4000 for `USER.md` as in OpenClaw. A cut file keeps its head, with no marker.
+most 4000 for `USER.md` as in OpenClaw. All files together are cut to OpenClaw's total
+budget, `bootstrapTotalMaxChars` (default 60000). A cut file keeps its head, with no
+marker (OpenClaw keeps head and tail and adds a marker).
 Symlinks are followed only within the workspace; a file resolving outside it, a
 non-regular file or one over 2 MiB is left out with a warning.
 
@@ -190,7 +194,7 @@ Still delivered: per-turn facts OpenClaw puts in the turn's user context (source
 delivery, runtime context blocks, relocated runtime facts), the native skills mount,
 `prependSystemContext`/`appendSystemContext` from other plugins' hooks, registered text
 transforms and the model identity line. If several plugins return `systemPrompt`, the
-highest-priority hook wins.
+highest-priority hook wins; this hook registers at priority 1000 so it runs first.
 
 ### Enroll
 

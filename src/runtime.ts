@@ -27,7 +27,10 @@ function readEnrollment(home: string) {
 
 /** The compiled snapshot, verified against its sync receipt. */
 function readVerifiedSnapshot(home: string) {
-  const bundle: unknown = JSON.parse(readPrivate(join(home, ".unblock-codex-prompt-bundle.json")));
+  let bundle: unknown;
+  // A parse error would quote the start of the file; never let bundle text reach a log.
+  try { bundle = JSON.parse(readPrivate(join(home, ".unblock-codex-prompt-bundle.json"))); }
+  catch (error) { if (error instanceof SyntaxError) throw new Error("Frozen bundle missing or invalid; run codex-prompt sync"); throw error; }
   if (!bundle || typeof bundle !== "object" || !("schema" in bundle) || bundle.schema !== 1 ||
       !("policy" in bundle) || typeof bundle.policy !== "string" || !("promptSha256" in bundle)) throw new Error("Frozen bundle missing or invalid; run codex-prompt sync");
   const prompt = readPrivate(join(home, "unblock-codex-prompt.md"));
