@@ -7,17 +7,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import plugin from "../dist/index.js";
 import { codexAdapterOwnership } from "../dist/adapter.js";
-import { claudeAdapterOwnership, installClaudeAdapter, prepareClaudeAdapter } from "../dist/claude-adapter.js";
+import { claudeAdapterOwnership } from "../dist/claude-adapter.js";
 import { compilePrompt } from "../dist/compiler.js";
 import { readEnrollment, restorePrompt, sha256, syncPrompt } from "../dist/manager.js";
 import { refreshCatalog } from "../dist/catalog.js";
 import { refreshCodexSkills } from "../dist/skills.js";
 import { readPromptPointer, setPromptPointer } from "../dist/toml.js";
+import { installLegacyClaudePatch, legacyCore } from "./helpers/legacy-claude.mjs";
 
 const { Command } = createRequire(import.meta.resolve("openclaw/plugin-sdk/plugin-entry"))("commander");
 const entryPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
-const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
-const claudeFixture = JSON.parse(await readFile(new URL("./fixtures/claude-assembly.json", import.meta.url), "utf8"));
 const codexFixture = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8"));
 const codexBundle = (name, source) => source + (name.startsWith("thread-requests-") ? "\nexport { buildDeveloperInstructions };\n" : "");
 
@@ -25,15 +24,7 @@ async function readTree(dir) {
   return Object.fromEntries(await Promise.all((await readdir(dir)).sort().map(async name => [name, await readFile(join(dir, name), "utf8")])));
 }
 
-async function fakeCore(root) {
-  const f = claudeFixture.functions;
-  await mkdir(join(root, "dist"), { recursive: true });
-  await writeFile(join(root, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.10.6" }));
-  await writeFile(join(root, "dist", "helpers-test.mjs"), `import { t as buildConfiguredAgentSystemPrompt } from "./system-prompt-config-test.mjs";\n${f.buildCliAgentSystemPrompt}\nexport { buildCliAgentSystemPrompt as t };\n`);
-  await writeFile(join(root, "dist", "system-prompt-config-test.mjs"), `import { n as buildAgentSystemPrompt } from "./system-prompt-test.mjs";\n${f.buildConfiguredAgentSystemPrompt}\nexport { buildConfiguredAgentSystemPrompt as t };\n`);
-  await writeFile(join(root, "dist", "system-prompt-test.mjs"), `${f.buildAgentSystemPrompt}\nexport { buildAgentSystemPrompt as n };\n`);
-  return root;
-}
+const fakeCore = root => legacyCore(root);
 
 async function fakeCodex(dir) {
   await mkdir(join(dir, "dist"), { recursive: true });
@@ -50,10 +41,16 @@ async function setup(t) {
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   await writeFile(join(workspace, "SOUL.md"), "SOUL");
-  t.mock.method(console, "log", () => {});
+  const output = [];
+  t.mock.method(console, "log", value => output.push(value));
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
-  globalThis.fetch = async () => new Response("FLEET", { headers: { "content-type": "text/plain", "x-prompt-revision": sha256("FLEET") } });
+  const requests = [];
+  globalThis.fetch = async url => {
+    requests.push(String(url));
+    const runtime = new URL(String(url)).searchParams.get("runtime");
+    return new Response("FLEET", { headers: { "content-type": "text/plain", "x-prompt-revision": sha256("FLEET"), ...runtime ? { "x-prompt-runtime": runtime } : {} } });
+  };
   const config = ({ grant = false, appServer } = {}) => ({
     agents: { list: [{ id: "main", agentDir, workspace, model: "anthropic/claude-opus-5" }] },
     plugins: { entries: {
@@ -70,39 +67,36 @@ async function setup(t) {
     registerCli({ program, config: cfg });
     await program.parseAsync(["node", "fixture", "codex-prompt", ...args]);
   };
-  // A packaged entry without its runtime module: a sync that reaches the Claude adapter stops there,
-  // so these CLI tests never patch the development OpenClaw dependency.
-  const detached = { source: join(root, "detached", "index.js") };
-  return { root, agentDir, workspace, config, run, detached };
+  const last = () => JSON.parse(output.at(-1));
+  return { root, agentDir, workspace, config, run, output, last, requests };
 }
 
+/** A Claude enrollment; with `core`, as a 0.4 sync left it: OpenClaw core patched too. */
 async function enrollClaude(agentDir, workspace, core) {
   const compiled = await compilePrompt(null, workspace, { text: "FLEET", url: "https://example.test/prompt?runtime=claude", revision: sha256("FLEET"), checkedAt: 0 });
   await syncPrompt({ agentDir, ...compiled }, { runtimes: ["claude-cli"] });
-  await installClaudeAdapter(agentDir, await prepareClaudeAdapter(agentDir, "main", runtimePath, core));
+  if (core) await installLegacyClaudePatch(agentDir, core);
 }
 
-test("restore removes Claude: an interrupted restore refuses implicit removal; a completed one lets Codex-only sync proceed without Claude", async t => {
-  const { root, agentDir, workspace, config, run } = await setup(t);
+test("an interrupted 0.4 restore leaves the Claude core patch: a Codex-only sync removes it without re-enrolling Claude", async t => {
+  const { root, agentDir, workspace, config, run, last } = await setup(t);
   const core = await fakeCore(join(root, "core"));
   const coreOriginal = await readTree(join(core, "dist"));
   const codexDir = await fakeCodex(join(root, "codex"));
   await enrollClaude(agentDir, workspace, core);
 
-  // Interrupted restore: enrollment paused, core still holds the adapter.
+  // Interrupted restore: enrollment paused, core still holds the 0.4 patch.
   await restorePrompt({ agentDir, prompt: "" });
   assert.equal(await claudeAdapterOwnership(agentDir), "patched");
   const codexOnly = config();
-  await assert.rejects(run(codexOnly, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir), /still holds the Claude CLI adapter[^]*restore to finish/);
-  assert.deepEqual((await readEnrollment(agentDir)).runtimes, ["claude-cli"]);
-  await assert.rejects(readFile(join(agentDir, "codex-home", "config.toml")), /ENOENT/);
-
-  await run(codexOnly, {}, "restore");
+  // No grant demanded and Claude not re-enrolled: only the leftover core bytes are removed.
+  await run(codexOnly, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir);
+  const synced = last();
+  assert.deepEqual(synced.legacyClaudeCoreRestored.files, ["helpers-test.mjs", "system-prompt-test.mjs"].map(name => join(core, "dist", name)));
+  assert.equal(synced.restartRequired, true);
+  assert.match(synced.activation, /restart the Gateway to reload the restored core/u);
   assert.deepEqual(await readTree(join(core, "dist")), coreOriginal);
   assert.equal(await claudeAdapterOwnership(agentDir), "restored");
-
-  // The retained Claude receipt is rollback evidence: no grant demanded, Claude not re-enrolled.
-  await run(codexOnly, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir);
   assert.deepEqual(await readEnrollment(agentDir), { active: true, previousPointer: null, runtimes: ["codex"] });
   assert.deepEqual(await readTree(join(core, "dist")), coreOriginal);
   assert.equal(await codexAdapterOwnership(agentDir), "patched");
@@ -118,33 +112,37 @@ test("restore removes Claude: an interrupted restore refuses implicit removal; a
 });
 
 test("restore removes Codex: a restored Codex receipt and unsupported Codex settings do not hold a Claude-only sync", async t => {
-  const { root, agentDir, config, run, detached } = await setup(t);
+  const { root, agentDir, config, run, last } = await setup(t);
   const codexDir = await fakeCodex(join(root, "codex"));
   await run(config(), resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir);
   await run(config(), {}, "restore");
   assert.equal(await codexAdapterOwnership(agentDir), "restored");
 
   // The operator moves Codex to a user-scoped home and the agent to Claude CLI. Selecting Codex
-  // would fail its settings check; the sync instead reaches the Claude adapter (stopped here).
+  // would fail its settings check; the Claude-only sync never selects it.
   const claudeOnly = config({ grant: true, appServer: { homeScope: "user" } });
-  await assert.rejects(run(claudeOnly, { ...resolverFor("claude-cli"), ...detached }, "sync"), /Missing durable plugin runtime/);
-  assert.deepEqual(await readEnrollment(agentDir), { active: false, previousPointer: null, runtimes: ["codex"] });
+  await run(claudeOnly, resolverFor("claude-cli"), "sync");
+  assert.deepEqual(await readEnrollment(agentDir), { active: true, previousPointer: null, runtimes: ["claude-cli"] });
+  assert.equal("legacyClaudeCoreRestored" in last(), false);
+  assert.equal(readPromptPointer(await readFile(join(agentDir, "codex-home", "config.toml"), "utf8")), null, "the restored Codex pointer is left alone");
   // Codex settings are still enforced when Codex is selected.
   await assert.rejects(run(claudeOnly, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir), /agent-scoped local stdio/);
   assert.equal(await codexAdapterOwnership(agentDir), "restored");
 });
 
 test("Codex settings are validated by sync, reported by status, and never block a first Claude enrollment or restore", async t => {
-  const { root, agentDir, config, run, detached } = await setup(t);
+  const { root, agentDir, config, run } = await setup(t);
   const userScoped = { appServer: { homeScope: "user" } };
   const logs = [];
   t.mock.method(console, "log", value => logs.push(value));
   // Fresh Claude-only target on a Gateway whose Codex is user-scoped.
   await run(config(userScoped), {}, "status");
   assert.equal(JSON.parse(logs.at(-1)).enrolled, false);
-  await assert.rejects(run(config({ ...userScoped, grant: true }), { ...resolverFor("claude-cli"), ...detached }, "sync"), /Missing durable plugin runtime/);
   await assert.rejects(run(config(userScoped), resolverFor("codex"), "sync", "--codex-plugin-dir", join(root, "codex")), /agent-scoped local stdio/);
   await assert.rejects(readdir(agentDir), /ENOENT/);
+  await run(config({ ...userScoped, grant: true }), resolverFor("claude-cli"), "sync");
+  assert.deepEqual(await readEnrollment(agentDir), { active: true, previousPointer: null, runtimes: ["claude-cli"] });
+  await run(config(userScoped), {}, "restore");
 
   // Codex enrolled while supported, then the operator switches Codex to a user-scoped home.
   const codexDir = await fakeCodex(join(root, "codex"));
@@ -287,9 +285,9 @@ test("a restored enrollment is saved in a schema older plugins read, keeps its r
   assert.deepEqual(state, { schema: 1, active: false, previousPointer: null, runtimes: ["claude-cli"] });
   assert.deepEqual(await readEnrollment(agentDir), { active: false, previousPointer: null, runtimes: ["claude-cli"] });
   // Active Claude enrollment stays schema 2, so an older plugin refuses it rather than mismanaging it.
-  await enrollClaude(agentDir, workspace, core);
+  await enrollClaude(agentDir, workspace);
   assert.equal(JSON.parse(await readFile(join(agentDir, "codex-home", ".unblock-codex-prompt.json"), "utf8")).schema, 2);
-  // The grant was removed after enrollment: the gate is not registered, so nothing is blocked.
+  // The grant was removed after enrollment: the hook is not registered, and that is reported.
   const startErrors = async cfg => {
     let started;
     plugin.register({ config: cfg, registerService: value => { started = value; }, registerCli() {}, on() {} });
@@ -300,8 +298,8 @@ test("a restored enrollment is saved in a schema older plugins read, keeps its r
   };
   const ungranted = await startErrors(config());
   assert.equal(ungranted.length, 1);
-  assert.match(ungranted[0], /final-adoption gate is not registered[^]*runs are not checked/);
-  assert.doesNotMatch(ungranted[0], /blocked/);
+  assert.match(ungranted[0], /Claude CLI prompt hook is not registered \(OpenClaw registers [^]*allowConversationAccess: true\); the target agent's Claude runs use OpenClaw's prompt/);
+  assert.deepEqual(await startErrors(config({ grant: true })), []);
   await run(config(), {}, "restore");
   let service;
   plugin.register({ config: config({ grant: true }), registerService: value => { service = value; }, registerCli() {}, on() {} });
@@ -309,6 +307,84 @@ test("a restored enrollment is saved in a schema older plugins read, keeps its r
   await service.start({ config: config({ grant: true }), logger: { info() {}, error: value => errors.push(value) } });
   await service.stop();
   assert.deepEqual(errors, []);
+});
+
+test("sync removes a 0.4 Claude core patch after validating it, reports it, and status and restore report a leftover", async t => {
+  const { root, agentDir, workspace, config, run, last, requests } = await setup(t);
+  const core = await fakeCore(join(root, "core"));
+  const coreOriginal = await readTree(join(core, "dist"));
+  const granted = config({ grant: true });
+  const claude = resolverFor("claude-cli");
+  // A 0.4 node: Claude enrolled and OpenClaw core patched.
+  await enrollClaude(agentDir, workspace, core);
+  await run(granted, {}, "status");
+  let status = last();
+  assert.deepEqual([status.ready, status.claude.ready, status.claude.promptHook, status.legacyClaudeCore.leftover, status.legacyClaudeCore.state], [false, false, "granted", true, "patched"]);
+  assert.match(status.legacyClaudeCore.coreIntegrity, /run codex-prompt sync or restore/);
+  let service;
+  plugin.register({ config: granted, registerService: value => { service = value; }, registerCli() {}, on() {} });
+  const errors = [];
+  await service.start({ config: granted, logger: { info() {}, error: value => errors.push(value) } });
+  await service.stop();
+  assert.deepEqual(errors, ["unblock-codex-prompt: OpenClaw core still holds the 0.4 Claude CLI patch; run openclaw codex-prompt sync (or restore), then restart the Gateway"]);
+
+  // A foreign edit in a patched chunk: sync refuses before fetching or writing anything.
+  const chunk = join(core, "dist", "helpers-test.mjs");
+  const patched = await readFile(chunk, "utf8");
+  const bundlePath = join(agentDir, "codex-home", ".unblock-codex-prompt-bundle.json");
+  const bundle = await readFile(bundlePath, "utf8");
+  await writeFile(chunk, patched + "\n// someone else\n");
+  requests.length = 0;
+  await assert.rejects(run(granted, claude, "sync"), /Cannot remove the 0\.4 Claude CLI core patch: Foreign OpenClaw core edit/);
+  assert.deepEqual(requests, []);
+  assert.equal(await readFile(bundlePath, "utf8"), bundle);
+  await writeFile(chunk, patched);
+
+  await run(granted, claude, "sync");
+  const synced = last();
+  assert.deepEqual(synced.legacyClaudeCoreRestored, { ownership: "patched", files: ["helpers-test.mjs", "system-prompt-test.mjs"].map(name => join(core, "dist", name)),
+    superseded: [], restartRequired: true });
+  assert.equal(synced.restartRequired, true);
+  assert.match(synced.activation, /builds the Claude CLI prompt on every turn[^]*restart the Gateway to reload the restored core\.$/u);
+  assert.deepEqual(await readTree(join(core, "dist")), coreOriginal);
+  await run(granted, {}, "status");
+  status = last();
+  assert.deepEqual([status.ready, status.claude.ready, status.legacyClaudeCore.leftover, status.legacyClaudeCore.state, status.legacyClaudeCore.coreIntegrity], [true, true, false, "original", "unmodified"]);
+  // Nothing left: the next sync needs no restart.
+  await run(granted, claude, "sync");
+  assert.equal("legacyClaudeCoreRestored" in last(), false);
+  assert.equal("restartRequired" in last(), false);
+  assert.doesNotMatch(last().activation, /reload the restored core/u);
+
+  // Restore removes a leftover too, and says the Gateway must reload the core.
+  await installLegacyClaudePatch(agentDir, core);
+  await run(granted, {}, "restore");
+  assert.deepEqual([last().legacyClaudeCore.files.length, last().legacyClaudeCore.restartRequired], [2, true]);
+  assert.match(last().activation, /restart the Gateway to reload the restored core/u);
+  assert.deepEqual(await readTree(join(core, "dist")), coreOriginal);
+  // Without a leftover, restore just says Claude turns use OpenClaw's prompt again.
+  await run(granted, claude, "sync");
+  await run(granted, {}, "restore");
+  assert.deepEqual(last().legacyClaudeCore.files, []);
+  assert.equal(last().activation, "The target agent's next Claude CLI turn uses OpenClaw's prompt.");
+});
+
+test("an unreadable 0.4 Claude receipt is reported by status and blocks sync, without breaking startup", async t => {
+  const { agentDir, workspace, config, run, last, requests } = await setup(t);
+  await enrollClaude(agentDir, workspace);
+  await writeFile(join(agentDir, "codex-home", ".unblock-claude-prompt-adapter.json"), "{");
+  const granted = config({ grant: true });
+  await run(granted, {}, "status");
+  assert.deepEqual([last().claude.ready, last().legacyClaudeCore.state, last().legacyClaudeCore.leftover], [false, "invalid", true]);
+  let service;
+  plugin.register({ config: granted, registerService: value => { service = value; }, registerCli() {}, on() {} });
+  const errors = [];
+  await service.start({ config: granted, logger: { info() {}, error: value => errors.push(value) } });
+  await service.stop();
+  assert.match(errors.join("\n"), /the 0\.4 Claude CLI core receipt is unreadable/);
+  requests.length = 0;
+  await assert.rejects(run(granted, resolverFor("claude-cli"), "sync"), /Cannot remove the 0\.4 Claude CLI core patch: /);
+  assert.deepEqual(requests, []);
 });
 
 /** plugin 0.3.x's enrollment check (manager parseEnrollment; runtime readFrozenPolicy checks the same fields). */

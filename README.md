@@ -1,9 +1,10 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.4.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.5.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
-through the Claude CLI backend on reviewed OpenClaw core layouts (2026.10.6–2026.10.9).
+through the Claude CLI backend, whose whole system prompt it replaces through
+OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
 See [Claude CLI agents](#claude-cli-agents).
 
 ## What you control
@@ -14,8 +15,9 @@ See [Claude CLI agents](#claude-cli-agents).
 - Each agent's memory reference (not memory bodies).
 
 **Identity and workspace files are live.** `SOUL.md`, `IDENTITY.md`, `USER.md`
-(shared and the session's selected personal file) and `AGENTS.md` are never
-snapshotted. OpenClaw loads them every turn, so an edit by you or by the agent
+and `AGENTS.md` are never snapshotted. On Codex OpenClaw loads them every turn
+(shared `USER.md` and the session's selected personal file); on Claude CLI the
+plugin reads the workspace files every turn. An edit by you or by the agent
 applies to the next turn without a sync. The `MEMORY.md` body stays out of the
 prompt; a memory reference points to it.
 
@@ -23,7 +25,8 @@ prompt; a memory reference points to it.
 session's catalog from OpenClaw's own session skills snapshot, exactly as OpenClaw
 renders it; the plugin never compiles or freezes a copy. Codex gets it in the thread
 developer instructions (see below); Claude gets it through OpenClaw's native
-`openclaw-skills` mount, or the live session skills prompt when no mount exists.
+`openclaw-skills` Claude plugin mount. When OpenClaw mounts no such plugin it lists
+skills in its system prompt instead, and that list is dropped with the rest of that prompt.
 
 **The fleet policy is live too.** On Codex the generated file (fleet policy and memory
 reference) replaces Codex's native base through `model_instructions_file`.
@@ -46,9 +49,10 @@ of the downloaded policy.
 
 **Still live and untouched:** native AGENTS.md, native skills, tool schemas and
 executor protocol, sandbox/approvals, native collaboration mechanics, routing
-identifiers, date/timezone and user messages. Reviewed duplicate OpenClaw prose is
-normalized; unknown `extraSystemPrompt` additions, including incognito context, survive. This is not total
-prompt ownership; other plugins/hooks can still add instructions.
+identifiers, date/timezone and user messages. On Codex, reviewed duplicate OpenClaw prose is
+normalized; unknown `extraSystemPrompt` additions, including incognito context, survive.
+On Claude CLI they are dropped (see [What Claude CLI no longer receives](#what-claude-cli-no-longer-receives)).
+This is not total prompt ownership; other plugins/hooks can still add instructions.
 
 Customer documents stay on each agent's machine, outside this package. Snapshot
 files use private permissions.
@@ -70,6 +74,11 @@ files use private permissions.
   managed `model_instructions_file`; status cannot attest to launcher behavior.
 - One target agent per installation. Other agents use upstream behavior. Native
   Codex children inherit the fleet policy and live persona.
+- Claude CLI: no OpenClaw core layout is reviewed or patched for Claude any more. The
+  plugin uses OpenClaw's public `before_prompt_build` hook, whose `systemPrompt`
+  result replaces the CLI system prompt, so it works on any OpenClaw version with that
+  hook behavior. Verified on **2026.10.6** and **2026.10.9** with
+  `scripts/validate-claude-hook.mjs` (see [Verify against an OpenClaw install](#verify-against-an-openclaw-install)).
 
 This bridge uses one private upstream seam, the guarded Codex context carriers,
 because public prompt hooks cannot fix the dropped-context path. It no longer depends
@@ -99,10 +108,11 @@ allowlist, visibility and size-limit logic; the plugin neither adds nor removes 
 ## Claude CLI agents
 
 For agents whose models run through OpenClaw's `claude-cli` backend, the plugin
-replaces **only OpenClaw's generic operating policy** with the fleet policy for Claude.
-Identity and workspace files stay live through OpenClaw's own project context. Claude Code's native system prompt and prefix,
-`CLAUDE.md`, independently installed Claude skills/plugins, tool schemas,
-permissions and authentication are untouched. Other agents, other CLI backends and
+replaces **OpenClaw's entire Claude CLI system prompt**, as it does for Codex. It
+does this through OpenClaw's public `before_prompt_build` hook and never patches
+OpenClaw core. Claude Code's native system prompt and prefix, `CLAUDE.md`,
+independently installed Claude skills/plugins, tool schemas, permissions and
+authentication are untouched. Other agents, other CLI backends and
 control/side-question operations keep upstream behavior.
 
 **Each runtime gets its own fleet policy.** The plugin fetches the configured
@@ -120,48 +130,67 @@ not depend on the Worker deploy.
 
 ### How it works
 
-OpenClaw renders the Claude CLI appended system prompt in core, not in a separate
-package. Two reviewed functions are patched with exact-byte backups, fingerprinted by
-function body (identical in 2026.10.6 and 2026.10.9) and located by following the
-assembly's own imports:
+For a run whose hook context names the `claude-cli` provider and the target agent
+(subagent sessions of that agent included), with an active enrollment that includes
+Claude CLI, the hook returns `systemPrompt`. OpenClaw uses it in place of the prompt it
+built (`prepareCliTurnPromptContext`), then applies registered text transforms and
+appends its model identity line. The prompt is, in order, with nothing else added:
 
-- `buildCliAgentSystemPrompt` scopes management to the target agent and the
-  host-generated `claude-cli/<model>` model display, then passes the hash-verified
-  snapshot down. Tampered or invalid enrolled state aborts the run.
-- `buildAgentSystemPrompt` reuses OpenClaw's own builders for the retained mechanics
-  and context, and omits the generic policy sections. Downstream Claude MCP
-  tool-naming guidance, registered text transforms and the model identity line
-  still apply.
+1. the Claude fleet policy (`runtime=claude`), never the Codex policy;
+2. the memory reference (`## Memory reference`);
+3. each of `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`
+   and `BOOTSTRAP.md` that exists in the run's workspace and is not empty, under a
+   `## <absolute path>` header. The `MEMORY.md` body is never included.
 
-| Context or mechanic | Claude CLI treatment |
-|---|---|
-| Fleet operating policy | The Claude policy (`runtime=claude`), once; never the Codex policy |
-| SOUL / IDENTITY / shared USER / selected personal USER | Live host project context, with host persona and precedence wording |
-| MEMORY body, generic memory recall section | Omitted; managed memory reference retained |
-| AGENTS / TOOLS / HEARTBEAT / BOOTSTRAP and other eligible files | Live host-selected context, routing and truncation; bootstrap notices |
-| Unknown `extraSystemPrompt`, including incognito restrictions | Kept, with the reviewed duplicate-prose normalization |
-| Output directives, messaging/delivery mechanics, channel message-tool hints | Kept (OpenClaw's builders) |
-| Authorized senders, exec-approval protocol, sandbox/elevated facts, TTS, reactions, Control UI embeds, collapsible details | Kept |
-| Directory roles, temporal facts, Runtime section, git co-author guidance | Kept |
-| Runtime-context block protocol | Short plugin-owned mechanics note |
-| Identity line, tooling list, tool-call style, execution bias, Care, OpenClaw Control, delegation/orchestration, docs, model aliases, UI presentation, side chat, silent-reply section | Replaced by the fleet policy |
-| OpenClaw's generated `openclaw-skills` Claude plugin | Kept |
-| Live session skills catalog (only when OpenClaw mounts no native plugin) | Kept |
+The files are read on every call from the run's workspace (the configured agent
+workspace when the run names none), so an edit applies to the next turn. Each file is
+cut to OpenClaw's per-file bootstrap cap: the agent's `bootstrapMaxChars`, else
+`agents.defaults.bootstrapMaxChars`, else OpenClaw's default of 20000 characters, and at
+most 4000 for `USER.md` as in OpenClaw. A cut file keeps its head, with no marker.
+Symlinks are followed only within the workspace; a file resolving outside it, a
+non-regular file or one over 2 MiB is left out with a warning.
 
-**Skills are live on both runtimes.** Both take the catalog from OpenClaw's session
-skills snapshot, so skill selection follows OpenClaw's session/refresh lifecycle on
-each: Codex in its thread developer instructions, Claude through OpenClaw's native
-skills mount or the live session skills prompt.
+The policy and memory reference come from the sync receipt, verified on every call
+(enrollment, prompt-file hash). Invalid or tampered enrolled state is logged as an
+error, without prompt text, and that run keeps OpenClaw's own prompt. Other agents,
+other providers, and paused or never-enrolled agents are left alone. When the hook
+returns nothing, OpenClaw's prompt applies unchanged.
 
-**Identity files are live on both runtimes, and so is the session's selected
-personal USER.md.** Unlike upstream OpenClaw, which keeps persona and personal files
-away from subagents, native Codex children inherit them with the thread developer
-instructions. Claude Code's native subagents do not receive the appended system
-prompt at all (verified on Claude Code 2.1.316), so they see neither the fleet policy
-nor persona. On Codex, editing a persona file or changing the skills catalog during a
-live incognito conversation changes its thread instructions, which Codex refuses for
-incognito threads: that thread's next turn fails. Start a new incognito conversation
-after such a change.
+**Skills.** Claude gets the session skills through OpenClaw's native `openclaw-skills`
+Claude plugin mount, which is not part of the system prompt and is kept.
+
+**Identity on both runtimes.** Native Codex children inherit persona with the thread
+developer instructions. Claude Code's native subagents do not receive the appended
+system prompt at all (verified on Claude Code 2.1.316), so they see neither the fleet
+policy nor persona. On Codex, editing a persona file or changing the skills catalog
+during a live incognito conversation changes its thread instructions, which Codex
+refuses for incognito threads: that thread's next turn fails. Start a new incognito
+conversation after such a change.
+
+### What Claude CLI no longer receives
+
+Replacing the whole prompt drops everything OpenClaw puts in it for these runs, with no
+exception for subagent sessions:
+
+- `extraSystemPrompt` content: incognito restrictions, group-chat and channel prompts,
+  and subagent task framing;
+- per-person `USER.md` overlays (the session's selected personal file); only the
+  workspace `USER.md` is carried;
+- OpenClaw's generic sections: identity line, tooling list, tool-call style, execution
+  bias, Care, OpenClaw Control, delegation, docs, model aliases, UI presentation, side
+  chat and silent replies;
+- its mechanics: output directives, messaging and delivery sections, channel hints,
+  authorized senders, exec-approval protocol, sandbox and elevated facts, TTS,
+  reactions, Control UI embeds, directory roles, the Runtime section, git co-author
+  guidance, bootstrap truncation notices, and the system-prompt skills list used when no
+  native skills plugin is mounted;
+- the Claude backend's tool-name section, which OpenClaw adds before hooks run.
+
+Still delivered: per-turn facts OpenClaw puts in the turn's user context (source
+delivery, runtime context blocks, relocated runtime facts), the native skills mount,
+`prependSystemContext`/`appendSystemContext` from other plugins' hooks, registered text
+transforms and the model identity line. If several plugins return `systemPrompt`, the
+highest-priority hook wins.
 
 ### Enroll
 
@@ -178,23 +207,27 @@ enroll a runtime by themselves.
 
 To drop a runtime, restore, change the agent's model configuration, then sync.
 The receipts and backups restore keeps are rollback evidence, so a restored
-runtime is not re-enrolled from them. If restore was interrupted and this plugin's
-patched bytes are still installed for a runtime that is no longer configured, sync
-refuses until `openclaw codex-prompt restore` completes.
+runtime is not re-enrolled from them. If a restore was interrupted and the Codex
+adapter's patched bytes are still installed while Codex is no longer configured, sync
+refuses until `openclaw codex-prompt restore` completes. A leftover 0.4 Claude core
+patch is instead removed by sync (see [Upgrading from 0.4](#upgrading-from-04-and-openclaw-updates)).
 
-Both adapters share one rule for a receipt. It is cleared once every recorded file is
-back at its original bytes (a completed restore), or once nothing of the plugin's is
-left: every changed file is gone (an update renamed it, or the install directory was
-deleted) or the recorded install version was replaced. A sync after that starts fresh,
-may target a different OpenClaw installation or Codex package, and replaces the old
-receipt's backups. Otherwise sync keeps refusing foreign edits and foreign backups.
+The Codex adapter and the 0.4 Claude core receipt share one rule. A receipt is cleared
+once every recorded file is back at its original bytes (a completed restore), or once
+nothing of the plugin's is left: every changed file is gone (an update renamed it, or
+the install directory was deleted) or the recorded install version was replaced. A
+Codex sync after that starts fresh, may target a different Codex package, and replaces
+the old receipt's backups. Otherwise sync and restore keep refusing foreign edits and
+foreign backups.
 
 Codex `appServer` settings (agent-scoped local stdio only) are checked by sync when
 it selects Codex and reported by status as `codexConfigError` for a Codex
 enrollment. They never block Claude-only enrollment, status or restore.
 
-Claude CLI enrollment requires the conversation-access grant for the
-final-adoption gate:
+Claude CLI enrollment needs the hook to be registrable. OpenClaw registers
+`before_prompt_build` for a non-bundled plugin only with
+`hooks.allowConversationAccess: true`, and blocks it when `hooks.allowPromptInjection`
+is `false` (it defaults to allowed). Sync refuses Claude without both:
 
 ```json5
 {
@@ -222,76 +255,58 @@ the file in the Codex layout.
 **Where each policy is stored.** The Codex policy stays the prefix of the generated file
 (`model_instructions_file`, also sent as `baseInstructions`). The Claude policy and the
 shared agent context are stored in the sync receipt (`.unblock-codex-prompt-bundle.json`)
-as `claudePolicy` (`text`, `url`, `revision`, `checkedAt`) and `agentContext`. The managed
-Claude prompt is `claudePolicy.text`, a blank line, then `agentContext`, read from the
-receipt only; the generated file is still verified against the receipt's `promptSha256`.
-The receipt is the trust root for Claude: anyone who can write it can set the policy, as
-with the file. The final-adoption gate compares the rendered prompt with what the
-receipt currently yields, so an edit to `claudePolicy` after assembly blocks the run and
-an invalid or missing `claudePolicy` fails closed with a "run codex-prompt sync" error.
+as `claudePolicy` (`text`, `url`, `revision`, `checkedAt`) and `agentContext`, and read
+from the receipt only; the generated file is still verified against the receipt's
+`promptSha256`. The receipt is the trust root for Claude: anyone who can write it can set
+the policy, as with the file. An invalid or missing `claudePolicy` is reported by status
+and leaves Claude runs on OpenClaw's prompt until `sync`.
 
-**Activation:** drain the target agent's work and restart the Gateway to load the
-patched core (and to register the gate after adding the grant). From sync until that
-restart, the running Gateway still holds unpatched core, so the gate blocks the
-target agent's enrolled Claude runs. The next Claude CLI
-process receives the managed prompt. Later policy refreshes change the prompt hash
-that OpenClaw keys live Claude processes on, so the conversation's next turn starts a
-new process with the new revision and resumes the conversation; its earlier history
-is not cleaned. Validate each policy revision in a fresh native conversation.
+**Activation.** The hook builds the prompt on every turn, so once the Gateway has
+loaded this plugin version the target agent's next Claude turn uses it: no restart
+after sync, refresh or a workspace edit. Installing or updating the plugin needs a
+Gateway restart to load it; a grant change hot-reloads under OpenClaw's default hybrid
+reload mode. A changed prompt changes the hash OpenClaw keys live Claude processes on,
+so the conversation's next turn starts a new process that resumes the conversation; its
+earlier history is not cleaned. Validate each policy revision in a fresh native
+conversation. Status `claude.ready` means enrolled, a valid Claude policy, the hook
+grant in place and no leftover 0.4 core patch.
 
-### Final-adoption gate
+Known limitations: OpenClaw runs prompt-build hooks only after it prepares them; if that
+fails (for example, history its hook isolation cannot copy) or its turn-context
+preparation fails, OpenClaw logs a warning and that run keeps OpenClaw's prompt. The
+plugin cannot see those runs.
 
-A `before_agent_run` gate, registered only with the grant above, checks enrolled
-Claude runs for the target agent. If the grant is removed after enrollment, the gate is
-not registered and those runs are not checked; startup logs this as an error. The CLI runner's gate context has no runtime
-identity, so an observe-only `before_prompt_build` hook marks runs whose preparation
-context reports `claude-cli`; it never changes the prompt. Keep `allowPromptInjection`
-unset or true. Model fallback reuses the run ID, so each preparation replaces the
-mark and a gate context naming a non-Claude provider is never checked as Claude: a
-Claude attempt that fails before execution cannot block its fallback. It blocks the run when the final system prompt
-lacks the verified managed policy, still contains OpenClaw's generic policy, or the
-managed state is invalid. This covers a lost assembly patch, a later prompt-hook
-replacement and an incompatible registered text transform. Never-enrolled or
-restored agents pass and are reported once with a sync suggestion. Prompt and
-history text are compared, never logged. It is a prompt-management guarantee
-while the plugin is enabled, not a security boundary.
+### Upgrading from 0.4 and OpenClaw updates
 
-Known limitation: a run is marked as Claude only when OpenClaw's prompt-build hooks
-run. If OpenClaw cannot prepare those hooks (for example, history holding a value its
-hook isolation cannot copy), the run is not marked and the gate does not check it. The
-assembly patch still manages the prompt; only this extra check is skipped. The gate
-does not block unmarked runs, because at that point nothing reliably tells a Claude
-run from another CLI backend.
+0.4 patched two OpenClaw core functions for Claude and kept a receipt
+(`codex-home/.unblock-claude-prompt-adapter.json`) with exact-byte backups. On a node
+with that patch still installed, status reports `legacyClaudeCore` with
+`leftover: true` and Claude is not ready. `sync` validates the patched files and their
+backups before writing anything, restores the original bytes, and reports
+`legacyClaudeCoreRestored` with `restartRequired: true`: restart the Gateway to reload
+the restored core. `restore` removes a leftover patch too. A same-version foreign edit
+to a patched file is refused rather than overwritten; files an OpenClaw update already
+replaced are left to the updater.
 
-### OpenClaw updates and core integrity
+Updating OpenClaw needs no restore for Claude: there is nothing in core to remove. Run
+`openclaw codex-prompt restore` first only while status still shows a leftover 0.4
+patch, or for Codex as described below.
 
-OpenClaw core ships `dist/postinstall-content-inventory.json`, which its update,
-triage and settlement paths compare against installed files. A patched core does
-not match it. Status reports `coreIntegrity` and distinguishes `patched`,
-`partial` (an interrupted restore), `original`, `missing` and `changed` core files. The plugin never edits vendor
-inventories.
-
-1. `openclaw codex-prompt restore`, then confirm status reports `original`.
-2. Update OpenClaw.
-3. Review the new layout. Sync refuses an unreviewed assembly function.
-4. `openclaw codex-prompt sync`, then restart the Gateway.
-
-If an update already replaced the patched chunks, restore leaves the updater's
-files alone (they are superseded) and restores any chunk still holding the plugin's
-bytes; enrolled Claude runs are blocked until re-sync. If OpenClaw was reinstalled in
-another directory and the old one deleted, the old receipt is superseded and sync
-targets the new installation directly. Prove update and rollback behavior on a disposable installation; inventory
-checks alone do not show which update paths fail.
-
-To review a layout without touching the Gateway's installation:
+### Verify against an OpenClaw install
 
 ```sh
 npm run build
-node scripts/validate-claude-layout.mjs /path/to/disposable/node_modules/openclaw
+node scripts/validate-claude-hook.mjs /path/to/node_modules/openclaw [...]
 ```
 
-It patches that copy, renders managed and upstream prompts through the real
-assembly, restores, and checks restored bytes against the vendor inventory.
+With no argument it checks the development dependency (also run by `npm test`). It
+loads that OpenClaw's own plugin registrar, hook runner, `resolvePromptBuildHookResult`
+and `prepareCliTurnPromptContext`, registers this plugin through them, and checks that
+the hook's prompt replaces OpenClaw's, that turn context stays in the user prompt, and
+that OpenClaw refuses the hook without the grant. It also asserts on the CLI runner's
+source that the hook context carries the provider, agent and workspace, that the hook
+result reaches the turn context, and that only finalization follows. It does not run a
+Claude CLI process. It uses a temporary state directory and changes nothing installed.
 
 ## Install and enroll
 
@@ -299,7 +314,7 @@ assembly, restores, and checks restored bytes against the vendor inventory.
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.4.0.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.0.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -325,8 +340,8 @@ required; the key keeps its historical name, though identity files are now live.
 Legacy `agentName` values remain accepted but are unused; identity comes from the
 live agent documents. Existing remote fleet configurations need no changes.
 Configurations without a remote URL or with base-only mode are no longer supported.
-Codex-only enrollment needs no conversation-access hook grant; Claude CLI
-enrollment requires one (see [Claude CLI agents](#claude-cli-agents)). Initial enrollment enables daily shared-prompt refresh
+Codex-only enrollment needs no hook grant; Claude CLI enrollment needs
+`hooks.allowConversationAccess: true` with prompt injection not disabled (see [Claude CLI agents](#claude-cli-agents)). Initial enrollment enables daily shared-prompt refresh
 and overdue startup catch-up. Startup never rebuilds local context or patches the
 adapter. The optional model-catalog service can also refresh metadata.
 
@@ -516,8 +531,8 @@ openclaw codex-prompt restore
 openclaw codex-prompt status
 ```
 
-Restore recovers exact original adapter bytes (Codex package and OpenClaw core),
-deactivates enrollment and restores the previous TOML pointer. It plans each adapter
+Restore recovers exact original adapter bytes (the Codex package, and any 0.4 Claude
+patch left in OpenClaw core), deactivates enrollment and restores the previous TOML pointer. It plans each adapter
 first, validating its files and the backups it will write; an adapter is restored only
 while any recorded file still holds the plugin's bytes. Restore then validates the
 pointer and pauses enrollment, and only then removes the Codex catalog and skills
@@ -528,30 +543,38 @@ foreign edits. A receipt whose files are restored, superseded or otherwise no lo
 hold the plugin's bytes never blocks a restore (its state is reported in the output
 and in status). Restore retains backup, receipt and generated files as rollback
 evidence; they do not keep a runtime enrolled. It does not require the current Codex
-`appServer` settings to be supported. Restart and use fresh conversations to activate it.
+`appServer` settings to be supported. Restart and use fresh conversations to activate it
+for Codex. Claude CLI turns use OpenClaw's prompt from the next turn, because the hook
+reads the paused enrollment; a restart is needed only when a 0.4 core patch was removed.
 Restore **before** disabling/uninstalling or changing target agents. Disabling
 without restoring leaves the managed base but re-enables OpenClaw's generic injections.
 
+### Rolling back to 0.4
+
+0.4 manages Claude CLI through its OpenClaw core patch, and its final-adoption gate
+blocks enrolled Claude runs whose prompt lacks it. Restore with 0.5 first, install 0.4,
+then run its `sync` and restart the Gateway. The Codex adapter and the state format are
+unchanged between 0.4 and 0.5.
+
 ### Rolling back to 0.3.x
 
-1. With 0.4 still installed, run `openclaw codex-prompt restore`. A restored enrollment
+1. With 0.5 still installed, run `openclaw codex-prompt restore`. A restored enrollment
    is saved in the state format 0.3 reads.
 2. Restart the Gateway so the restored OpenClaw core and Codex package are loaded.
 3. Install the 0.3.x plugin, then run its `sync` if you want it to manage the agent again.
 
 0.3.x cannot manage Claude CLI agents. Any enrollment that includes Codex, with or
 without Claude, and any restored enrollment are saved in the format 0.3.x reads. If the
-plugin is rolled back without restoring first, the 0.4 patches find the older runtime
-and fall back instead of failing turns: 0.3.x keeps managing Codex, which reads the
-policy from its base file, and Claude renders OpenClaw's normal prompt. An active
-Claude-only enrollment is refused by 0.3.x; install 0.4 again and restore. 0.3.x
-rewrites the state without the Claude runtime when it syncs or restores, and does not
-restore OpenClaw core: after returning to 0.4, run restore (or sync) before relying on
-Claude runs. A 0.4 snapshot uses a heading 0.3.x's daily refresh does not recognize, so
+plugin is rolled back without restoring first, the Codex patch finds the older runtime
+and falls back instead of failing turns: 0.3.x keeps managing Codex, which reads the
+policy from its base file, and Claude renders OpenClaw's normal prompt (0.3.x registers
+no Claude hook). An active Claude-only enrollment is refused by 0.3.x; install 0.5 again
+and restore. 0.3.x rewrites the state without the Claude runtime when it syncs or
+restores. A 0.4 or 0.5 snapshot uses a heading 0.3.x's daily refresh does not recognize, so
 after rolling back, run 0.3.x's `sync` once to rebuild it. That sync reinstalls 0.3.x's
 Codex patch and its frozen skills catalog; drain and restart after it, as after any
-sync. Until then the 0.4 patch keeps relaying the live catalog (the relay is inline in
-the patch, so it does not depend on the plugin runtime).
+sync. Until then the current Codex patch keeps relaying the live catalog (the relay is
+inline in the patch, so it does not depend on the plugin runtime).
 
 ## Safety and scope
 
@@ -564,15 +587,15 @@ the patch, so it does not depend on the plugin runtime).
 - Do not run concurrent sync/install/restore operations. If a crash left an empty
   lock directory, confirm no sync is running before removing it.
 - A prompt guides behavior; it is not a security boundary or obedience guarantee.
-- The fleet policy replaces OpenClaw's generic policy, so upstream base-policy
-  improvements are not inherited. Review upgrades.
+- The fleet policy replaces OpenClaw's generic policy (on Claude CLI, OpenClaw's whole
+  system prompt), so upstream base-policy improvements are not inherited. Review upgrades.
 - Never commit customer snapshots, raw captures, credentials or host backups.
 
 ## Development and release
 
 ```sh
 npm run preflight
-npm run release:check -- v0.4.0
+npm run release:check -- v0.5.0
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -582,7 +605,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.4.0 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.0 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

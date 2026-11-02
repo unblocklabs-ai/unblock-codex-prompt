@@ -1,5 +1,67 @@
 # Validation
 
+## Claude CLI prompt through `before_prompt_build`, no core patch — 2026-11-02 (unreleased, 0.5.0)
+
+- **Owner decision.** Claude is treated like Codex: for the target agent's `claude-cli`
+  runs, subagent sessions included, OpenClaw's system prompt is replaced completely.
+  `extraSystemPrompt` content (incognito, group prompts, subagent task framing) and
+  per-person `USER.md` overlays are dropped; the README lists everything else dropped.
+- **Hook.** `before_prompt_build` returns `{ systemPrompt }` when `ctx.modelProviderId`
+  is `claude-cli` (case-insensitive, as OpenClaw's `isClaudeCliBackendId`), `ctx.agentId`
+  is the configured target (the managed-target predicate's semantics, now also a runtime
+  function), and the enrollment is active and includes Claude CLI. The prompt is the
+  Claude policy, the memory reference, then each present, non-empty `AGENTS.md`,
+  `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `BOOTSTRAP.md` from
+  `ctx.workspaceDir` (else the configured workspace) under `## <absolute path>`, read
+  every call. Per-file cap: agent `bootstrapMaxChars`, else
+  `agents.defaults.bootstrapMaxChars`, else 20000; `USER.md` at most 4000 (OpenClaw's
+  `DEFAULT_BOOTSTRAP_MAX_CHARS`/`USER_BOOTSTRAP_MAX_CHARS`, `bootstrap-*.mjs`, identical
+  in 2026.10.6 and 2026.10.9). Invalid or tampered state (enrollment, bundle,
+  prompt-file hash, Claude policy) logs an error without prompt text and returns nothing.
+- **Verified OpenClaw behavior (2026.10.6 and 2026.10.9).** `prepareCliTurnPromptContext`
+  replaces the built prompt with a trimmed hook `systemPrompt`, after the backend's
+  `transformSystemPrompt`; only text transforms and the model identity line follow.
+  `mergeBeforePromptBuild` keeps the first `systemPrompt` (highest priority first).
+  Side questions and control operations skip prompt-build hooks.
+- **Permission.** `before_prompt_build` is both a prompt-injection hook
+  (`hook-types-*.mjs`: `isPromptInjectionHookName`) and a conversation hook
+  (`registry-*.mjs`: `conversationHookNames`). `registerTypedHook` refuses it when
+  `allowPromptInjection === false`, and for a non-bundled plugin unless
+  `allowConversationAccess === true` (`hook-policy-decisions-*.mjs`). OpenClaw's
+  `docs/plugins/hooks.md` says the same ("The first two hooks therefore need both
+  permissions"). So the conversation-access grant is still required; sync refuses Claude
+  without it or with prompt injection disabled, and the hook is registered only then.
+- **Removed.** The Claude assembly patch (fingerprints, render/helper edits, prepare and
+  install), the `before_agent_run` final-adoption gate and its runId correlation,
+  `checkClaudeAdoption`, `readClaudeManagedPrompt` (replaced by
+  `readClaudeManagedContext`, so a leftover 0.4 patch finds no export and renders
+  upstream), `scripts/validate-claude-layout.mjs`, `test/fixtures/claude-assembly.json`
+  and the patch-only tests.
+- **0.4 cleanup.** The receipt parser and `planClaudeRestore`/`applyClaudeRestore` stay on
+  the shared patched-file lifecycle. Sync validates a leftover patch (files and backups)
+  before fetching or writing, restores it after the prompt state, and reports
+  `legacyClaudeCoreRestored` with `restartRequired: true`. Restore still removes it.
+  Status reports `legacyClaudeCore` (`leftover`, `state`, `coreIntegrity`); a leftover
+  makes Claude not ready and is logged at startup. A Codex-only sync no longer refuses
+  over a leftover Claude patch; it removes it.
+- **Status and activation.** `claude.ready` = enrolled, valid Claude policy, hook grant,
+  no leftover patch; `claude.promptHook` is `granted` or the reason. Sync activation for
+  Claude: no restart once the Gateway runs this version; a restart only to load a plugin
+  install/update or after a 0.4 core patch was removed. Claude-only sync no longer needs
+  the packaged runtime entry (only Codex patches load it).
+- **Real-OpenClaw check.** `scripts/validate-claude-hook.mjs` (also in `npm test` via
+  `test/claude-hook-openclaw.test.mjs`) passed against 2026.10.9 (dev dependency) and the
+  2026.10.6 install. It registers this plugin through OpenClaw's own typed-hook
+  registrar, runs the real hook runner, `resolvePromptBuildHookResult` and
+  `prepareCliTurnPromptContext` (and `finalizeCliSystemPrompt` on 2026.10.9), and asserts
+  the CLI runner's wiring on source. It does not run a Claude CLI process.
+- **Tests.** Hook output order and exact text, MEMORY.md and missing/empty files, live
+  edits, unmanaged agent/provider/paused/disabled/Codex-only, tampered state logging,
+  caps, workspace fallback and symlink boundary, registration grant; legacy restore
+  scenarios (clean, partial, update, foreign edit, invalid backup); sync removal with
+  byte check, refusal before fetch on a foreign edit, status and restore reporting;
+  sync refusal without conversation access or with `allowPromptInjection: false`.
+
 ## Live OpenClaw skills catalog on Codex — 2026-11-01 (unreleased, 0.4.0)
 
 - **Codex gets the session catalog live.** The reviewed `renderCodexSkillsInstructions`

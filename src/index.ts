@@ -3,9 +3,11 @@ import { definePluginEntry, type OpenClawConfig } from "openclaw/plugin-sdk/plug
 import { parseConfig, PLUGIN_ID } from "./config.js";
 import { promptStatus, readEnrollment, restorePrompt, syncPrompt, refreshSharedPrompt, type Enrollment, type ManagedRuntime } from "./manager.js";
 import { adapterStatus, applyAdapterRestore, codexAdapterOwnership, installAdapter, planAdapterRestore, prepareAdapter } from "./adapter.js";
-import { applyClaudeRestore, claudeAdapterOwnership, claudeAdapterStatus, installClaudeAdapter, planClaudeRestore, prepareClaudeAdapter } from "./claude-adapter.js";
+import { applyClaudeRestore, claudeAdapterStatus, planClaudeRestore } from "./claude-adapter.js";
+import { bootstrapMaxChars, buildClaudeSystemPrompt } from "./claude-prompt.js";
 import { fetchAndCompile } from "./compiler.js";
-import { checkClaudeAdoption, readClaudeManagedPrompt, readFrozenPolicy } from "./runtime.js";
+import { managedTargetAgent } from "./managed-target.js";
+import { readClaudeManagedContext, readFrozenPolicy } from "./runtime.js";
 import { detectConfiguredRuntimes, runtimePolicyResolver } from "./runtimes.js";
 import { policyFetchers } from "./remote.js";
 import { parseClaudePolicy, readOptional } from "./manager.js";
@@ -71,15 +73,21 @@ async function resolveTarget(config: OpenClawConfig) {
 }
 
 /**
- * The final-adoption gate needs conversation access; non-bundled plugins must opt in.
- * Its run correlation uses an observe-only prompt-build hook, so prompt injection must
- * not be disabled either.
+ * Why OpenClaw would not register the Claude prompt hook, if it would not. OpenClaw (2026.10.6 and
+ * 2026.10.9) blocks before_prompt_build when `hooks.allowPromptInjection` is false, and registers
+ * it for a non-bundled plugin only with `hooks.allowConversationAccess: true`.
  */
-function gateGranted(config: OpenClawConfig | undefined) {
+function promptHookProblem(config: OpenClawConfig | undefined) {
   // Inspection and metadata-only registration may not supply a config.
-  const hooks: unknown = (config?.plugins?.entries?.[PLUGIN_ID] as Record<string, unknown> | undefined)?.hooks;
-  return !!hooks && typeof hooks === "object" && "allowConversationAccess" in hooks && hooks.allowConversationAccess === true &&
-    !("allowPromptInjection" in hooks && hooks.allowPromptInjection === false);
+  const raw: unknown = (config?.plugins?.entries?.[PLUGIN_ID] as Record<string, unknown> | undefined)?.hooks;
+  const hooks = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  if (hooks.allowPromptInjection === false) {
+    return `plugins.entries.${PLUGIN_ID}.hooks.allowPromptInjection is false, which blocks the before_prompt_build hook that replaces the Claude CLI prompt; remove it or set it to true`;
+  }
+  if (hooks.allowConversationAccess !== true) {
+    return `OpenClaw registers the before_prompt_build hook that replaces the Claude CLI prompt only with plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess: true`;
+  }
+  return undefined;
 }
 
 function errorMessage(error: unknown) { return error instanceof Error ? error.message : "Invalid frozen state"; }
@@ -93,14 +101,17 @@ async function status(config: OpenClawConfig) {
   let codexReady = false;
   const codexConfigError = runtimes.includes("codex") ? codexAppServerProblem(config) : undefined;
   if (runtimes.includes("codex") && !codexConfigError) try { codexReady = disk.enrolled && readFrozenPolicy(target.agentDir) !== null && adapter.installed; } catch (cause) { error = errorMessage(cause); }
+  // A 0.4 install patched OpenClaw core for Claude; any receipt it left is reported. An unreadable
+  // receipt is reported too, and counts as a possible leftover until sync or restore resolves it.
+  const legacyClaudeCore = await claudeAdapterStatus(target.agentDir)
+    .catch(cause => ({ installed: false, leftover: true, state: "invalid" as const, error: errorMessage(cause) }));
   let claude;
   if (runtimes.includes("claude-cli")) {
-    const claudeAdapter = await claudeAdapterStatus(target.agentDir);
-    let snapshot = false;
+    let managed = false;
     let claudeError: string | undefined;
-    try { snapshot = disk.enrolled && readClaudeManagedPrompt(target.agentDir) !== null; } catch (cause) { claudeError = errorMessage(cause); }
-    const granted = gateGranted(config);
-    claude = { ready: snapshot && claudeAdapter.installed && granted, adapter: claudeAdapter, adoptionGate: granted ? "granted" as const : "requires hooks.allowConversationAccess: true and allowPromptInjection not false", error: claudeError };
+    try { managed = disk.enrolled && readClaudeManagedContext(target.agentDir) !== null; } catch (cause) { claudeError = errorMessage(cause); }
+    const hookProblem = promptHookProblem(config);
+    claude = { ready: managed && !hookProblem && !legacyClaudeCore.leftover, promptHook: hookProblem ?? "granted", error: claudeError };
   }
   const ready = disk.enrolled && runtimes.length > 0 && (!runtimes.includes("codex") || codexReady) && (!claude || claude.ready);
   // Status inspects installed instructions without fetching or rebuilding them.
@@ -108,13 +119,14 @@ async function status(config: OpenClawConfig) {
   const receipt: unknown = bundle ? JSON.parse(bundle) : null;
   const remotePrompt = receipt && typeof receipt === "object" && "remotePrompt" in receipt ? receipt.remotePrompt : null;
   const claudePolicy = runtimes.includes("claude-cli") ? claudePolicyReceipt(receipt) : null;
-  return { ...disk, frozen: true, ready, adapter, error, ...codexConfigError ? { codexConfigError } : {}, ...claude ? { claude } : {}, configuredPromptUrl: target.settings.promptUrl, remotePrompt, ...runtimes.includes("claude-cli") ? { claudePolicy } : {} };
+  return { ...disk, frozen: true, ready, adapter, error, ...codexConfigError ? { codexConfigError } : {}, ...claude ? { claude } : {},
+    ...legacyClaudeCore.state !== "absent" ? { legacyClaudeCore } : {}, configuredPromptUrl: target.settings.promptUrl, remotePrompt, ...runtimes.includes("claude-cli") ? { claudePolicy } : {} };
 }
 
 export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Unblock Codex Prompt",
-  description: "Explicitly compile a frozen fleet prompt with guarded OpenClaw bridges for Codex and Claude CLI.",
+  description: "Explicitly compile a frozen fleet prompt with a guarded Codex bridge and a Claude CLI prompt hook.",
   register(api) {
     let stopCatalogRefresh: (() => Promise<void>) | undefined;
     // Registration/import stays read-only, including plugin inspection and CLI discovery.
@@ -134,12 +146,16 @@ export default definePluginEntry({
         if (result.enrolled && result.codexConfigError) {
           ctx.logger.error(`${PLUGIN_ID}: Codex management is not effective: ${result.codexConfigError}; restore, or return Codex to agent-scoped local stdio and re-sync`);
         }
+        if (result.legacyClaudeCore?.state === "invalid") {
+          ctx.logger.error(`${PLUGIN_ID}: the 0.4 Claude CLI core receipt is unreadable (${"error" in result.legacyClaudeCore ? result.legacyClaudeCore.error : "invalid"}); inspect it, then run openclaw codex-prompt sync or restore`);
+        } else if (result.legacyClaudeCore?.leftover) {
+          ctx.logger.error(`${PLUGIN_ID}: OpenClaw core still holds the 0.4 Claude CLI patch; run openclaw codex-prompt sync (or restore), then restart the Gateway`);
+        }
         if (result.enrolled && result.claude && !result.claude.ready) {
-          if (result.claude.adoptionGate !== "granted") {
-            // Without the grant the gate is never registered, so nothing checks or blocks these runs.
-            ctx.logger.error(`${PLUGIN_ID}: the Claude CLI final-adoption gate is not registered (${result.claude.adoptionGate}); enrolled Claude runs are not checked (adapter ${result.claude.adapter.state}). Restore the grant and restart the Gateway, or run codex-prompt restore`);
-          } else {
-            ctx.logger.error(`${PLUGIN_ID}: Claude CLI management is not ready (${result.claude.adapter.state}); enrolled Claude runs are blocked until codex-prompt sync and a Gateway restart`);
+          if (result.claude.promptHook !== "granted") {
+            ctx.logger.error(`${PLUGIN_ID}: the Claude CLI prompt hook is not registered (${result.claude.promptHook}); the target agent's Claude runs use OpenClaw's prompt. Restore the grant, or run openclaw codex-prompt restore`);
+          } else if (result.claude.error) {
+            ctx.logger.error(`${PLUGIN_ID}: Claude CLI managed state is invalid (${result.claude.error}); the target agent's Claude runs use OpenClaw's prompt until openclaw codex-prompt sync`);
           }
         }
         if (result.enrolled) {
@@ -165,46 +181,33 @@ export default definePluginEntry({
       async stop() { await stopCatalogRefresh?.(); stopCatalogRefresh = undefined; },
     });
 
-    // Claude-scoped final-adoption gate. The CLI runner's before_agent_run context has no
-    // runtime identity, so its preparation-path prompt-build hook (which does) marks the
-    // run first. Other agents and runtimes pass immediately; never-enrolled Claude runs stay
-    // upstream and are reported, enrolled broken management blocks.
-    if (gateGranted(api.config)) {
-      const claudeRuns = new Set<string>();
-      const reported = new Set<string>();
-      const targetAgent = () => {
-        const entry = api.config.plugins?.entries?.[PLUGIN_ID];
-        const raw: unknown = entry?.config;
-        if (entry?.enabled !== true) return undefined;
-        return raw && typeof raw === "object" && "agentId" in raw && typeof raw.agentId === "string" ? raw.agentId : "main";
-      };
-      api.on("before_prompt_build", (_event, ctx) => {
-        if (!ctx.runId) return;
-        // Model fallback reuses the runId per attempt; each preparation replaces the mark, so a
-        // Claude attempt that failed before execution cannot gate a later non-Claude attempt.
-        if (ctx.modelProviderId !== "claude-cli" || ctx.agentId !== targetAgent()) { claudeRuns.delete(ctx.runId); return; }
-        claudeRuns.add(ctx.runId);
-        // Bound runs that were prepared but never reached execution.
-        if (claudeRuns.size > 256) claudeRuns.delete(claudeRuns.values().next().value!);
-      });
-      api.on("before_agent_run", (event, ctx) => {
-        if (!ctx.runId) return;
-        // Embedded and worker attempts name their provider (some skip prompt-build); the CLI
-        // runner does not. A named non-Claude provider is never a Claude CLI run.
-        if (ctx.modelProviderId !== undefined && ctx.modelProviderId !== "claude-cli") { claudeRuns.delete(ctx.runId); return; }
-        if (!claudeRuns.delete(ctx.runId)) return;
-        // Preparation already matched the target agent; the runner's agentId may be unset.
-        const target = targetAgent();
-        if (target === undefined) return;
-        const result = checkClaudeAdoption(resolveAgentDir(api.config, target), event.systemPrompt);
-        if (result.outcome === "pass") return;
-        if (result.outcome === "unmanaged") {
-          if (!reported.has(target)) api.logger.warn(`${PLUGIN_ID}: Claude CLI run for agent ${target} is not managed; run openclaw codex-prompt sync to enroll it`);
-          reported.add(target);
+    // Claude CLI prompt: for the target agent's claude-cli runs (subagent sessions included) the
+    // hook returns the complete system prompt, which OpenClaw uses in place of its own. It is
+    // built on every call from the verified enrollment and the live workspace files. Other agents
+    // and providers, and paused or unenrolled state, return nothing. Invalid or tampered state is
+    // logged and also returns nothing, so that run keeps OpenClaw's prompt. Prompt text is never logged.
+    if (!promptHookProblem(api.config)) {
+      const reportedSkips = new Set<string>();
+      api.on("before_prompt_build", async (_event, ctx) => {
+        if (typeof ctx.modelProviderId !== "string" || ctx.modelProviderId.trim().toLowerCase() !== "claude-cli") return;
+        const config = api.config;
+        const agentId = managedTargetAgent(config);
+        if (agentId === undefined || ctx.agentId !== agentId) return;
+        try {
+          const managed = readClaudeManagedContext(resolveAgentDir(config, agentId));
+          if (!managed) return;
+          const workspace = typeof ctx.workspaceDir === "string" && isAbsolute(ctx.workspaceDir) ? ctx.workspaceDir : resolveAgentWorkspaceDir(config, agentId);
+          const { systemPrompt, skipped } = await buildClaudeSystemPrompt(managed, workspace, bootstrapMaxChars(config, agentId));
+          for (const { path, reason } of skipped) {
+            if (reportedSkips.has(`${path}\0${reason}`)) continue;
+            reportedSkips.add(`${path}\0${reason}`);
+            api.logger.warn(`${PLUGIN_ID}: ${path} is left out of the Claude CLI prompt: ${reason}`);
+          }
+          return { systemPrompt };
+        } catch (error) {
+          api.logger.error(`${PLUGIN_ID}: Claude CLI run for agent ${agentId} uses OpenClaw's prompt: ${errorMessage(error)}`);
           return;
         }
-        api.logger.error(`${PLUGIN_ID}: blocked Claude CLI run for agent ${target}: ${result.reason}`);
-        return { outcome: "block", reason: result.reason, message: `Blocked by ${PLUGIN_ID}: ${result.reason}.` };
       });
     }
 
@@ -226,17 +229,12 @@ export default definePluginEntry({
         });
       root.command("refresh").description("Refresh remote prompt, enabled catalog and codex skills without rereading frozen agent context")
         .action(async () => console.log(JSON.stringify(await refresh(await resolveTarget(config)), null, 2)));
-      const sync = root.command("sync").description("Explicitly refresh the prompt snapshot and install the reviewed adapters for configured runtimes")
+      const sync = root.command("sync").description("Explicitly refresh the prompt snapshot, install the reviewed Codex adapter and enable the Claude CLI prompt for configured runtimes")
         .option("--adopt", "Take ownership of an existing custom prompt pointer")
         .option("--codex-plugin-dir <path>", "Verified official Codex package directory (required on first Codex sync)");
       sync.action(async () => {
         const target = await resolveTarget(config);
         const options = sync.opts<{ adopt?: boolean; codexPluginDir?: string }>();
-        // Captured import.meta.url paths expire with the CLI. Older hosts expose the
-        // published dist/index.js via source; newer hosts select it via runtimeSource.
-        const source = "runtimeSource" in api && typeof api.runtimeSource === "string" ? api.runtimeSource : api.source;
-        if (!isAbsolute(source) || basename(source) !== "index.js") throw new Error("Frozen sync requires the packaged plugin runtime entry");
-        const runtimePath = join(dirname(source), "runtime.js");
         const enrollment = await readEnrollment(target.agentDir);
         const enrolled = enrollment?.active ? enrollment.runtimes : [];
         const detection = detectConfiguredRuntimes(config, target.settings.agentId, runtimePolicyResolver(api));
@@ -248,19 +246,26 @@ export default definePluginEntry({
         if (!codex && await codexAdapterOwnership(target.agentDir) === "patched") {
           throw new Error("The Codex adapter is still patched but Codex is neither enrolled nor configured; run openclaw codex-prompt restore to finish removing it");
         }
-        if (!claude && await claudeAdapterOwnership(target.agentDir) === "patched") {
-          throw new Error("OpenClaw core still holds the Claude CLI adapter but Claude CLI is neither enrolled nor configured; run openclaw codex-prompt restore to finish removing it");
-        }
         if (!codex && !claude) {
           throw new Error(`No managed runtime detected for agent ${target.settings.agentId} (policy resolver ${detection.resolver}); configure a claude-cli runtime or pass --codex-plugin-dir for Codex`);
         }
-        if (claude && !gateGranted(config)) {
-          throw new Error(`Claude CLI management requires plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess: true (and allowPromptInjection not false) for its final-adoption gate`);
-        }
+        const hookProblem = claude ? promptHookProblem(config) : undefined;
+        if (hookProblem) throw new Error(`Claude CLI management needs its prompt hook: ${hookProblem}`);
         // Validate every adapter before writing any prompt state.
-        if (codex) assertCodexAppServer(config);
-        const codexPlan = codex ? await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir, runtimePath) : undefined;
-        const claudePlan = claude ? await prepareClaudeAdapter(target.agentDir, target.settings.agentId, runtimePath) : undefined;
+        let codexPlan;
+        if (codex) {
+          assertCodexAppServer(config);
+          // Captured import.meta.url paths expire with the CLI. Older hosts expose the
+          // published dist/index.js via source; newer hosts select it via runtimeSource.
+          const source = "runtimeSource" in api && typeof api.runtimeSource === "string" ? api.runtimeSource : api.source;
+          if (!isAbsolute(source) || basename(source) !== "index.js") throw new Error("Frozen sync requires the packaged plugin runtime entry");
+          codexPlan = await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir, join(dirname(source), "runtime.js"));
+        }
+        // A 0.4 install patched OpenClaw core for Claude. Its restore is validated (files and
+        // backups) here, before any write, and applied with this sync.
+        let legacyClaude;
+        try { legacyClaude = await planClaudeRestore(target.agentDir); }
+        catch (error) { throw new Error(`Cannot remove the 0.4 Claude CLI core patch: ${errorMessage(error)}`); }
         // Every enrolled runtime's policy is fetched before anything is written: Codex without
         // `runtime` (any Worker version), Claude with runtime=claude. Claude-only never reads the
         // Codex artifact. Skills are not compiled: both runtimes get the session catalog live.
@@ -268,12 +273,15 @@ export default definePluginEntry({
         const runtimes: ManagedRuntime[] = [...codex ? ["codex" as const] : [], ...claude ? ["claude-cli" as const] : []];
         const result = await syncPrompt({ ...target, ...compiled }, { adopt: options.adopt === true, runtimes });
         const adapter = codexPlan ? await installAdapter(target.agentDir, codexPlan) : undefined;
-        const claudeAdapter = claudePlan ? await installClaudeAdapter(target.agentDir, claudePlan) : undefined;
+        const legacyClaudeCoreRestored = legacyClaude.files.length ? await applyClaudeRestore(legacyClaude) : undefined;
         const catalog = codex && target.settings.suppressExplicitDelegationPrompt ? await refreshCatalog(target.agentDir) : undefined;
         const codexSkills = codex ? await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills) : undefined;
-        console.log(JSON.stringify({ ...result, adapter, claudeAdapter, detection: { resolver: detection.resolver, models: detection.detections },
+        const activation = legacyClaudeCoreRestored
+          ? `${result.activation} The 0.4 Claude CLI patch was removed from OpenClaw core: restart the Gateway to reload the restored core.`
+          : result.activation;
+        console.log(JSON.stringify({ ...result, activation, adapter, detection: { resolver: detection.resolver, models: detection.detections },
           ...remote ? { remotePrompt: remote } : {}, ...claudePolicy ? { claudePolicy } : {}, catalog, codexSkills,
-          ...claude ? { coreIntegrity: "OpenClaw core is patched; run openclaw codex-prompt restore before updating OpenClaw, then re-sync" } : {} }, null, 2));
+          ...legacyClaudeCoreRestored ? { legacyClaudeCoreRestored, restartRequired: true } : {} }, null, 2));
       });
       root.command("restore").description("Restore owned prompt components; pause automatic management and retain files")
         .action(async () => {
@@ -293,9 +301,10 @@ export default definePluginEntry({
             await removeCodexSkills(target.agentDir);
           }
           const codexAdapter = await applyAdapterRestore(codexPlan);
-          const claudeAdapter = await applyClaudeRestore(claudePlan);
-          console.log(JSON.stringify({ ...prompt, ...codexAdapter.ownership !== "none" ? { codexAdapter } : {}, ...claudeAdapter.ownership !== "none" ? { claudeAdapter } : {},
-            ...claudeAdapter.restartRequired ? { activation: "Restart the Gateway to reload the restored OpenClaw core; Claude CLI runs then use upstream prompts." } : {} }, null, 2));
+          const legacyClaudeCore = await applyClaudeRestore(claudePlan);
+          console.log(JSON.stringify({ ...prompt, ...codexAdapter.ownership !== "none" ? { codexAdapter } : {}, ...legacyClaudeCore.ownership !== "none" ? { legacyClaudeCore } : {},
+            ...legacyClaudeCore.restartRequired ? { activation: "The 0.4 Claude CLI patch was removed from OpenClaw core: restart the Gateway to reload the restored core." }
+              : enrollment?.runtimes.includes("claude-cli") ? { activation: "The target agent's next Claude CLI turn uses OpenClaw's prompt." } : {} }, null, 2));
         });
     }, { descriptors: [{ name: "codex-prompt", description: "Manage an agent-scoped fleet prompt for Codex and Claude CLI", hasSubcommands: true }] });
   },

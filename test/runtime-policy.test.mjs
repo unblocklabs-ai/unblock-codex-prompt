@@ -9,7 +9,13 @@ import { fetchAndCompile } from "../dist/compiler.js";
 import { refreshSharedPrompt, restorePrompt, sha256, syncPrompt } from "../dist/manager.js";
 import { policyFetchers } from "../dist/remote.js";
 import { refreshFailure } from "../dist/refresh-error.js";
-import { checkClaudeAdoption, readClaudeManagedPrompt, readCodexBaseInstructions, readFrozenPolicy } from "../dist/runtime.js";
+import { readClaudeManagedContext, readCodexBaseInstructions, readFrozenPolicy } from "../dist/runtime.js";
+
+/** The managed part of the Claude prompt: policy, then the memory reference (workspace files follow in the hook). */
+function readClaudeManagedPrompt(agentDir) {
+  const managed = readClaudeManagedContext(agentDir);
+  return managed && `${managed.policy}\n\n${managed.agentContext}`;
+}
 
 const { Command } = createRequire(import.meta.resolve("openclaw/plugin-sdk/plugin-entry"))("commander");
 const url = "https://fleet-prompt.example.test/prompt?channel=prod";
@@ -72,7 +78,7 @@ test("Claude-only sync never requests the Codex artifact; the prompt file is the
   assert.doesNotMatch(file, /CLAUDE POLICY|CODEX POLICY|skills catalog/);
   assert.deepEqual([bundle.policy, "sources" in bundle, "skillCount" in bundle, "remotePrompt" in bundle, "basePromptLength" in bundle], ["", false, false, false, false]);
   assert.deepEqual(bundle.claudePolicy, { text: "CLAUDE POLICY A", url: `${url}&runtime=claude`, revision: sha256("CLAUDE POLICY A"), checkedAt: 100 });
-  assert.deepEqual(readClaudeManagedPrompt(agentDir), { prompt: `CLAUDE POLICY A\n\n${bundle.agentContext}`, sha256: sha256(`CLAUDE POLICY A\n\n${bundle.agentContext}`) });
+  assert.deepEqual(readClaudeManagedContext(agentDir), { policy: "CLAUDE POLICY A", agentContext: bundle.agentContext });
   assert.throws(() => readFrozenPolicy(agentDir), /without Codex enrollment/);
 
   w.calls.length = 0;
@@ -81,7 +87,7 @@ test("Claude-only sync never requests the Codex artifact; the prompt file is the
   assert.deepEqual(w.calls.map(call => call.search), ["?channel=prod&runtime=claude"]);
   assert.deepEqual([refreshed.changed, refreshed.nextClaudeProcess, "nextCodexTurn" in refreshed, "revision" in refreshed], [true, true, false, false]);
   assert.equal(await readFile(files(agentDir).prompt, "utf8"), file, "the Claude-only prompt file is untouched");
-  assert.match(readClaudeManagedPrompt(agentDir).prompt, /^CLAUDE POLICY B\n\n## Memory reference\n/);
+  assert.match(readClaudeManagedPrompt(agentDir), /^CLAUDE POLICY B\n\n## Memory reference\n/);
 });
 
 test("a both-runtime sync makes exactly two fetches: Codex without runtime, Claude with runtime=claude, channel preserved", async () => {
@@ -99,7 +105,7 @@ test("a both-runtime sync makes exactly two fetches: Codex without runtime, Clau
   assert.equal(bundle.claudePolicy.text, "CLAUDE POLICY A");
   assert.equal(bundle.remotePrompt.revision, sha256("CODEX POLICY A"));
   // Each runtime sees only its own policy; neither file carries a skills catalog.
-  const managed = readClaudeManagedPrompt(agentDir).prompt;
+  const managed = readClaudeManagedPrompt(agentDir);
   assert.equal(managed.split("CLAUDE POLICY A").length, 2);
   assert.doesNotMatch(managed, /CODEX POLICY|skills catalog/i);
   const codexPrompt = readCodexBaseInstructions(agentDir);
@@ -127,9 +133,7 @@ test("a changed Claude revision changes only the Claude prompt: the Codex file k
   assert.equal(await readFile(prompt, "utf8"), before.bytes);
   assert.deepEqual([after.ino, after.mtimeMs], [before.stat.ino, before.stat.mtimeMs]);
   assert.equal(readCodexBaseInstructions(agentDir), before.codex);
-  const managed = readClaudeManagedPrompt(agentDir);
-  assert.notEqual(managed.sha256, before.managed.sha256);
-  assert.equal(managed.prompt, before.managed.prompt.replace("CLAUDE POLICY A", "CLAUDE POLICY B"));
+  assert.equal(readClaudeManagedPrompt(agentDir), before.managed.replace("CLAUDE POLICY A", "CLAUDE POLICY B"));
   const bundle = await bundleOf(agentDir);
   assert.equal(bundle.claudePolicy.checkedAt, 300);
   assert.equal(bundle.remotePrompt.checkedAt, 300);
@@ -192,33 +196,29 @@ test("a Claude-enrolled bundle without a valid Claude policy is an invalid state
     mutate(bundle);
     await writeFile(f.bundle, JSON.stringify(bundle));
     assert.throws(() => readClaudeManagedPrompt(agentDir), /run codex-prompt sync/);
-    assert.equal(checkClaudeAdoption(agentDir, "anything").outcome, "block");
     await assert.rejects(refreshSharedPrompt(agentDir, { claude: () => assert.fail("must not fetch") }), /run codex-prompt sync/);
   }
   await writeFile(f.bundle, good);
   assert.ok(readClaudeManagedPrompt(agentDir));
 });
 
-test("the bundle is the trust root: editing claudePolicy changes the managed prompt, and the gate compares against the current bundle", async () => {
+test("the bundle is the trust root: editing claudePolicy changes the managed prompt; an unverified prompt file fails closed", async () => {
   const w = worker();
   const agentDir = await dir("tamper-claude");
   await sync(agentDir, w, { codex: false, claude: true });
   const f = files(agentDir);
-  const assembled = readClaudeManagedPrompt(agentDir).prompt;
-  assert.deepEqual(checkClaudeAdoption(agentDir, `${assembled}\n\n## Runtime`), { outcome: "pass" });
   const bundle = await bundleOf(agentDir);
+  // An edit to the receipt is indistinguishable from a sync: whoever can write the bundle owns the policy.
   await writeFile(f.bundle, JSON.stringify({ ...bundle, claudePolicy: { ...bundle.claudePolicy, text: "TAMPERED POLICY" } }));
-  // An edit after assembly cannot make a prompt that lacks the new policy pass.
-  assert.match(checkClaudeAdoption(agentDir, assembled).reason, /replaced or altered after assembly/);
-  assert.equal(readClaudeManagedPrompt(agentDir).prompt.startsWith("TAMPERED POLICY"), true);
-  // An edit before assembly is indistinguishable from a sync: whoever can write the bundle owns the policy.
-  assert.deepEqual(checkClaudeAdoption(agentDir, readClaudeManagedPrompt(agentDir).prompt), { outcome: "pass" });
+  assert.equal(readClaudeManagedPrompt(agentDir).startsWith("TAMPERED POLICY\n\n## Memory reference\n"), true);
   // The prompt file is verified against the bundle's hash; a bundle written without re-hashing it fails closed.
   await writeFile(f.bundle, JSON.stringify({ ...bundle, promptSha256: sha256("other") }));
-  assert.match(checkClaudeAdoption(agentDir, assembled).reason, /invalid or changed outside sync/);
+  assert.throws(() => readClaudeManagedContext(agentDir), /changed outside sync/);
   await writeFile(f.bundle, JSON.stringify(bundle));
   await writeFile(f.prompt, "tampered");
-  assert.equal(checkClaudeAdoption(agentDir, assembled).outcome, "block");
+  assert.throws(() => readClaudeManagedContext(agentDir), /changed outside sync/);
+  await writeFile(join(f.home, ".unblock-codex-prompt.json"), "{");
+  assert.throws(() => readClaudeManagedContext(agentDir), /Invalid frozen bridge enrollment/);
 });
 
 test("status reports each runtime's policy revision and never policy text", async t => {
