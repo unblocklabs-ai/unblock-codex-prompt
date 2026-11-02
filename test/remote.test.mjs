@@ -7,7 +7,7 @@ import { parseConfig } from "../dist/config.js";
 import { fetchPrompt } from "../dist/remote.js";
 import { compilePrompt } from "../dist/compiler.js";
 import { sha256, syncPrompt, refreshSharedPrompt, restorePrompt } from "../dist/manager.js";
-import { readFrozenPolicy } from "../dist/runtime.js";
+import { readCodexBaseInstructions, readFrozenPolicy } from "../dist/runtime.js";
 
 const url = "https://fleet-prompt.unblocklabs.ai/prompt?channel=dev";
 const text = "# Fleet operating instructions\n\nExact approved policy.\n";
@@ -31,24 +31,25 @@ test("remote config requires the bridge and credential-free HTTPS", () => {
 async function enrolledRemote() {
   const agentDir = await mkdtemp(join(await realpath(tmpdir()), "shared-refresh-"));
   await writeFile(join(agentDir, "SOUL.md"), "Frozen soul");
-  const compiled = await compilePrompt(text, agentDir, { prompt: "Frozen skills", count: 1 });
+  const compiled = await compilePrompt(text, agentDir);
   compiled.bundle.remotePrompt = { url, revision: sha256(text) };
   await syncPrompt({ agentDir, ...compiled });
   const home = join(agentDir, "codex-home");
   return { agentDir, compiled, path: join(home, "unblock-codex-prompt.md"), bundlePath: join(home, ".unblock-codex-prompt-bundle.json") };
 }
 
-test("shared refresh changes only the prefix, preserves frozen context, and leaves unchanged prompt bytes/inode alone", async () => {
+test("shared refresh changes only the policy prefix and leaves unchanged prompt bytes/inode alone", async () => {
   const f = await enrolledRemote();
+  assert.ok(f.compiled.prompt.startsWith(text.trim() + "\n\n## Memory reference\n"));
   await writeFile(join(f.agentDir, "SOUL.md"), "New soul must not leak into refresh");
   const updated = "<primary_instructions>\nNew shared policy 🦀\n</primary_instructions>\n";
-  const fetchBase = () => fetchPrompt(url, async () => response(updated));
-  assert.equal((await refreshSharedPrompt(f.agentDir, fetchBase, 1000)).changed, true);
+  const fetchBase = { codex: () => fetchPrompt(url, async () => response(updated)) };
+  const refreshed = await refreshSharedPrompt(f.agentDir, fetchBase, 1000);
+  assert.deepEqual([refreshed.changed, refreshed.nextCodexTurn, "newSessionRequired" in refreshed], [true, true, false]);
   const prompt = await readFile(f.path, "utf8");
   assert.equal(prompt, updated.trim() + f.compiled.prompt.slice(f.compiled.bundle.basePromptLength));
+  assert.equal(readCodexBaseInstructions(f.agentDir), prompt);
   const bundle = JSON.parse(await readFile(f.bundlePath, "utf8"));
-  assert.deepEqual(bundle.sources, f.compiled.bundle.sources);
-  assert.equal(bundle.skillCount, 1);
   assert.equal(bundle.remotePrompt.checkedAt, 1000);
   assert.equal(readFrozenPolicy(f.agentDir), "");
   const before = await stat(f.path);
@@ -57,41 +58,79 @@ test("shared refresh changes only the prefix, preserves frozen context, and leav
   assert.equal((await stat(f.path)).mtimeMs, before.mtimeMs);
 });
 
+test("refresh keeps an older snapshot's frozen skills catalog tail byte-for-byte until the next sync", async () => {
+  const catalogTail = "\n\n## Frozen OpenClaw skills catalog\nThis is the approved agent-workspace catalog at sync time, not a promise that credentials or tools remain available.\n\n<available_skills><skill>legacy</skill></available_skills>\n";
+  // 0.3 (frozen identity sections) and pre-live-catalog 0.4 (live identity) snapshots both end in the catalog.
+  const tails = ["\n\n## Frozen agent context\nThis context is a local snapshot.\n\n### SOUL.md\nOld soul\n\n## Frozen memory reference\nRead MEMORY.md." + catalogTail,
+    "\n\n## Agent context\nThe runtime supplies this agent's identity and workspace files live.\n\n## Memory reference\nRead MEMORY.md." + catalogTail];
+  for (const tail of tails) {
+    const agentDir = await mkdtemp(join(await realpath(tmpdir()), "legacy-catalog-"));
+    const prompt = text.trim() + tail;
+    const bundle = { schema: 1, policy: "", sources: [{ name: "OpenClaw skills catalog", sha256: sha256("<available_skills><skill>legacy</skill></available_skills>") }],
+      skillCount: 1, basePromptLength: text.trim().length, remotePrompt: { url, revision: sha256(text), checkedAt: 0 } };
+    await syncPrompt({ agentDir, prompt, bundle });
+    const updated = "New shared policy";
+    const refreshed = await refreshSharedPrompt(agentDir, { codex: () => fetchPrompt(url, async () => response(updated)) }, 1000);
+    assert.equal(refreshed.changed, true);
+    const home = join(agentDir, "codex-home");
+    const after = await readFile(join(home, "unblock-codex-prompt.md"), "utf8");
+    assert.equal(after, updated + tail);
+    assert.ok(after.endsWith(catalogTail));
+    assert.equal(readCodexBaseInstructions(agentDir), after);
+    // Unknown legacy fields carry forward untouched; only the prefix receipt changes.
+    const stored = JSON.parse(await readFile(join(home, ".unblock-codex-prompt-bundle.json"), "utf8"));
+    assert.deepEqual([stored.sources, stored.skillCount, stored.basePromptLength], [bundle.sources, 1, updated.length]);
+  }
+});
+
 test("failed validation retains prompt and receipt; restored and foreign state never fetch", async () => {
   const f = await enrolledRemote();
   const before = await readFile(f.bundlePath, "utf8");
-  await assert.rejects(refreshSharedPrompt(f.agentDir, () => fetchPrompt(url, async () => response("bad", { "x-prompt-revision": "wrong" }))), /revision/);
+  await assert.rejects(refreshSharedPrompt(f.agentDir, { codex: () => fetchPrompt(url, async () => response("bad", { "x-prompt-revision": "wrong" })) }), /revision/);
   assert.equal(await readFile(f.path, "utf8"), f.compiled.prompt);
   assert.equal(await readFile(f.bundlePath, "utf8"), before);
   await writeFile(f.path, "foreign edit");
-  const never = () => { assert.fail("must not fetch"); };
+  const never = { codex: () => { assert.fail("must not fetch"); }, claude: () => { assert.fail("must not fetch"); } };
   await assert.rejects(refreshSharedPrompt(f.agentDir, never), /snapshot/);
   await restorePrompt({ agentDir: f.agentDir, prompt: "" });
   assert.equal((await refreshSharedPrompt(f.agentDir, never)).skipped, true);
 });
 
-test("legacy snapshot migrates without rereading context; ambiguous legacy boundary is refused", async () => {
+test("0.3 and 0.4-branch snapshots refresh by their older boundary headings; unknown boundaries and missing prefix lengths are refused", async () => {
+  // 0.3.x snapshots start their context with `## Frozen agent context`, 0.4 branch builds with
+  // `## Agent context`; every remote snapshot records its prefix length.
+  for (const legacy of ["\n\n## Frozen agent context\nOld context.", "\n\n## Agent context\nOld context."]) {
+    const f = await enrolledRemote();
+    const original = f.compiled.prompt.slice(0, f.compiled.bundle.basePromptLength) + legacy + f.compiled.prompt.slice(f.compiled.bundle.basePromptLength);
+    const bundle = JSON.parse(await readFile(f.bundlePath, "utf8"));
+    bundle.promptSha256 = sha256(original);
+    await writeFile(f.path, original);
+    await writeFile(f.bundlePath, JSON.stringify(bundle));
+    await refreshSharedPrompt(f.agentDir, { codex: () => fetchPrompt(url, async () => response("New base\n")) });
+    assert.equal(await readFile(f.path, "utf8"), "New base" + original.slice(f.compiled.bundle.basePromptLength));
+    const prompt = await readFile(f.path, "utf8");
+    const missing = JSON.parse(await readFile(f.bundlePath, "utf8"));
+    delete missing.basePromptLength;
+    await writeFile(f.bundlePath, JSON.stringify(missing));
+    await assert.rejects(refreshSharedPrompt(f.agentDir, { codex: () => { assert.fail("must not fetch"); } }), /ambiguous/);
+    assert.equal(await readFile(f.path, "utf8"), prompt);
+  }
   const f = await enrolledRemote();
+  const unknown = f.compiled.prompt.replace("\n\n## Memory reference\n", "\n\n## Something else\n");
   const bundle = JSON.parse(await readFile(f.bundlePath, "utf8"));
-  delete bundle.basePromptLength;
+  bundle.promptSha256 = sha256(unknown);
+  await writeFile(f.path, unknown);
   await writeFile(f.bundlePath, JSON.stringify(bundle));
-  await refreshSharedPrompt(f.agentDir, () => fetchPrompt(url, async () => response("New base\n")));
-  assert.equal(await readFile(f.path, "utf8"), "New base" + f.compiled.prompt.slice(f.compiled.bundle.basePromptLength));
-  const prompt = await readFile(f.path, "utf8") + "\n\n## Frozen agent context\nambiguous";
-  const legacy = JSON.parse(await readFile(f.bundlePath, "utf8"));
-  delete legacy.basePromptLength;
-  legacy.promptSha256 = sha256(prompt);
-  await writeFile(f.path, prompt);
-  await writeFile(f.bundlePath, JSON.stringify(legacy));
-  await assert.rejects(refreshSharedPrompt(f.agentDir, () => { assert.fail("must not fetch"); }), /ambiguous/);
+  await assert.rejects(refreshSharedPrompt(f.agentDir, { codex: () => { assert.fail("must not fetch"); } }), /ambiguous/);
+  assert.equal(await readFile(f.path, "utf8"), unknown);
 });
 
 test("receipt publication failure rolls back the prompt while preserving the concurrent receipt edit", async () => {
   const f = await enrolledRemote();
-  await assert.rejects(refreshSharedPrompt(f.agentDir, async () => {
+  await assert.rejects(refreshSharedPrompt(f.agentDir, { codex: async () => {
     await writeFile(f.bundlePath, "concurrent receipt edit");
     return fetchPrompt(url, async () => response("New base\n"));
-  }), /Concurrent edit/);
+  } }), /Concurrent edit/);
   assert.equal(await readFile(f.path, "utf8"), f.compiled.prompt);
   assert.equal(await readFile(f.bundlePath, "utf8"), "concurrent receipt edit");
 });
@@ -121,7 +160,7 @@ test("remote snapshot is cached locally; failed fetch cannot replace it with a b
   const home = join(agentDir, "codex-home");
   await mkdir(home);
   const remote = await fetchPrompt(url, async () => response());
-  const compiled = await compilePrompt(remote.prompt, agentDir, { prompt: "", count: 0 });
+  const compiled = await compilePrompt(remote.prompt, agentDir);
   compiled.bundle.remotePrompt = remote.source;
   await syncPrompt({ agentDir, ...compiled });
   const path = join(home, "unblock-codex-prompt.md");

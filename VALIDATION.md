@@ -1,5 +1,285 @@
 # Validation
 
+## Live OpenClaw skills catalog on Codex — 2026-11-01 (unreleased, 0.4.0)
+
+- **Codex gets the session catalog live.** The reviewed `renderCodexSkillsInstructions`
+  is renamed and wrapped (as the thread and workspace wrappers are) instead of returning
+  early. Unmanaged: the original output. Managed: the original renderer runs, its output
+  (OpenClaw's "## OpenClaw Skills" section with the `skills_search`/`skills_read` hints
+  and the raw session snapshot prompt, or nothing when
+  `shouldIncludeAgentHarnessRuntimeContext` fails) is relayed on the attempt params, and
+  the wrapper returns nothing, so skills are in neither the refreshable nor the
+  parent-local carrier. Checked against real 2026.10.5 and 2026.10.9: the only call site
+  passes `runtimeParams` (fresh per attempt) after the workspace loader and before
+  `buildDeveloperInstructions(runtimeParams)`; all four functions were already pinned
+  and are byte-identical. No fingerprints were added.
+- **One live-context relay.** `Symbol.for("unblock-codex-prompt.live-context")` holds
+  `{ skills, persona }`, non-enumerable (copies of params and request fingerprints do not
+  carry it). It replaces the `unblock-codex-prompt.persona` key. Managed developer
+  instructions are `[policy, skills, persona, gitCoauthorPrompt, normalized additions]`,
+  empty sections dropped. The relay is inline in the patch, so it keeps working after a
+  plugin rollback without restore.
+- **No frozen catalog.** `buildSkillsCatalog` (OpenClaw's private `buildSkillSnapshot`
+  export) and the catalog segment are gone; the bundle no longer has `sources` or
+  `skillCount` (a 0.3 runtime reads only `schema`, `policy` and `promptSha256`). Refresh
+  still slices at `basePromptLength`, so an older snapshot keeps its frozen catalog tail
+  byte-for-byte until the next sync; the older patch suppresses the live catalog, so no
+  thread sees both. Sync output no longer reports `skillCount`.
+- **One managed-target predicate.** `src/managed-target.ts` generates the inline
+  JavaScript both bridges use (plugin enabled and allowed, entry enabled,
+  `frozenContext: true`, target agent default `main`, target-changed error). Claude passes
+  its `claude-cli/` model-display check as an extra condition, evaluated before the
+  target-changed error as before. The gate's `targetAgent` in `src/index.ts` is unchanged.
+- **Behavior notes (README).** Between sync and the Gateway restart the earlier patch
+  still suppresses skills while the new file has no catalog: drain and restart. A catalog
+  change, like a persona edit, makes Codex refuse a live incognito thread's next turn.
+  Editing only a `SKILL.md` body does not change the catalog.
+- **Tests.** Refreshable adapter: exact `skills, persona, COAUTHOR, ROUTING` on creation
+  and reuse with no refreshable or parent-local carrier; a changed tag shows the new
+  catalog; unmanaged agents and a paused enrollment keep upstream refreshable and
+  parent-local skills; no harness runtime context gives no skills; the hints pass
+  through (with and without a prompt); a `{...params}` copy has no skills; renderer,
+  workspace loader and developer builder in three separate VM realms; an older runtime
+  without `readCodexBaseInstructions` still relays skills. Compile: no catalog in the
+  Codex base file, no `sources`/`skillCount`. Refresh: 0.3 and pre-change 0.4 snapshots
+  keep their catalog tail byte-for-byte. New `test/managed-target.test.mjs` compares the
+  generated predicate with both previous inline gates over a config matrix. New
+  `scripts/validate-claude-layout.mjs` check renders the patched real
+  `buildAgentSystemPrompt` with a `nativeCommandGuidanceLines` sentinel and the managed
+  params: kept, once (#11 P3-13). Claude-only daily refresh schedule test: the timer is
+  armed from the enrolled runtime's `checkedAt`, not immediately.
+
+## Per-runtime fleet policy delivery (issue #11) — 2026-11-01 (unreleased, 0.4.0)
+
+- **Codex is unchanged.** It fetches the configured `promptUrl` with no `runtime`
+  parameter, so it works against the deployed Worker; the prompt file layout, the prefix
+  refresh and `policy: ""` are as before.
+- **Claude** fetches `promptUrl` with `runtime=claude` (URL API, `channel` kept) and
+  requires `X-Prompt-Runtime: claude`. The receipt stores `claudePolicy` (`text`, `url`,
+  `revision`, `checkedAt`) and `agentContext`; `readClaudeManagedPrompt` returns
+  `claudePolicy.text + "\n\n" + agentContext` from the receipt only, with the prompt file
+  still checked against `promptSha256`. Removed: `catalogLength`, the frozen-catalog
+  boundary check and the dead `policy.trim()` join (P3-12).
+- **Claude-only prompt file** holds just the agent context (the
+  `## Memory reference` section). Claude-only sync never fetches the Codex artifact; no
+  `remotePrompt`/`basePromptLength`.
+- **Sync and refresh** fetch every enrolled runtime before writing. Any failure writes
+  nothing; HTTP 400 for `runtime=claude` (a Worker without runtime support) and a missing
+  `X-Prompt-Runtime` say to deploy the fleet-prompt Worker with runtime support first.
+  Refresh then updates the Codex prefix and/or `claudePolicy` in the existing locked
+  write (prompt rollback if the receipt write fails) and returns `nextCodexTurn` and
+  `nextClaudeProcess` separately, plus `revision` (Codex) and `claudeRevision`.
+- **Status and sync output** report `remotePrompt` (Codex) and `claudePolicy` (`url`,
+  `revision`, `checkedAt`); policy text is never printed. The daily schedule uses the
+  oldest `checkedAt` among enrolled runtimes.
+- **Trust root:** the receipt. Editing `claudePolicy` changes the managed prompt, and the
+  gate compares against the receipt as it is then: an edit after assembly blocks, an edit
+  before assembly is indistinguishable from a sync. A missing or malformed `claudePolicy`
+  or `agentContext` throws "run codex-prompt sync" and the gate blocks.
+- **Intentional test changes:** `refreshSharedPrompt` takes `{ codex?, claude? }` fetchers
+  (remote tests); `compilePrompt(base, workspace, claudePolicy?)` accepts a null
+  base for Claude-only (Claude fixtures in the lifecycle, adapter and ownership
+  tests now pass a Claude policy; the Claude-only fixtures use the agent-context-only file;
+  the mixed fixture adds Codex with the Codex layout).
+- **New tests** (`test/runtime-policy.test.mjs`): Codex-only sync/refresh against a Worker
+  that rejects `runtime`; Claude-only sync without the Codex artifact; both
+  runtimes make exactly two fetches; a changed Claude revision leaves the Codex file
+  byte-, inode- and mtime-identical; a changed Codex revision leaves the Claude prompt
+  identical; failed Claude fetches (400, unconfirmed runtime, offline, 503) write nothing
+  and name the Worker deploy; invalid Claude policy fails closed; tampered `claudePolicy`
+  against the gate; status reports revisions without text.
+- `npm run preflight` (Node 24.22.1): 75 tests, both Inspector checks, package
+  validation. `scripts/validate-claude-layout.mjs` (distinct Codex and Claude policies;
+  Claude renders only its own, once; six gate passes) passes on OpenClaw 2026.10.6 and
+  2026.10.9. Real `@openclaw/codex` 2026.10.5 and 2026.10.9 patch 6 files; 2026.9.9 is
+  refused. No patch fingerprints, Codex persona mechanism, gate logic or
+  `src/patched-files.ts` changed.
+
+## Shared patched-file lifecycle (issue #11) — 2026-11-01 (unreleased, 0.4.0)
+
+- **One lifecycle for both adapters.** `src/patched-files.ts` owns receipt ownership,
+  prepare, install, status and restore planning. The adapters keep discovery,
+  fingerprints, patch rendering, receipt formats and install identity. Receipt paths and
+  formats are unchanged; 0.2.0 schema-1 and 0.3 version-less Codex receipts still read
+  and restore. Ownership: `patched` if any file holds our bytes; `restored` if all are
+  original; `superseded` if every changed file is missing or the recorded version was
+  replaced; otherwise `changed`. A restored or superseded receipt is cleared: any root,
+  replaceable backups.
+- **Restore** plans both adapters (nothing unless our bytes are installed), refuses
+  only if there is no enrollment and nothing to restore, validates the pointer and
+  pauses, then restores the Codex catalog and skills block (Codex enrollments only),
+  then applies both plans. Behavior change: an adapter whose files no longer hold our
+  bytes (`changed`, for example a single-file 0.2.0 receipt with a foreign edit) is
+  reported, not refused. Codex adapter status gains `state`, `packageDir` and
+  `packageVersion`.
+- **Enrollment:** schema 1 unless active Claude-only (schema 2); Codex-only omits
+  `runtimes`. An active Codex and Claude enrollment is schema 1, which 0.3.x reads as Codex.
+- **Detection** counts only the agent's own allowed-model map.
+- **Startup log:** without the grant it reports that the gate is not registered and runs
+  are not checked.
+- **Removed:** `promptMatches`/`expectedSha256`, refresh's branch for snapshots without
+  `basePromptLength` (every remote snapshot since 0.1.0 records it; the older
+  `## Agent context` and `## Frozen agent context` boundary headings are still accepted), and `restoreAdapter`/`restoreClaudeAdapter`.
+- Tests: a table-driven suite runs seven ownership/restore scenarios against both
+  adapters with identical outcomes. Further tests cover a version-less 0.3 receipt after
+  an update renames its bundles, a deleted OpenClaw root, a refused restore leaving the
+  skills block and catalog unchanged, a changed Claude receipt not blocking a Codex-only
+  restore, the enrollment schemas against a 0.3 parser, and the startup log.
+- `npm run preflight` (Node 24.22.1): 66 tests, both Inspector checks, package
+  validation. `scripts/validate-claude-layout.mjs` passes on OpenClaw 2026.10.6 and
+  2026.10.9. Real `@openclaw/codex` 2026.10.5 and 2026.10.9 patch 6 files, pass
+  `node --check`, record their version and restore exact bytes; 2026.9.9 is refused.
+
+## Review findings (issue #10) — 2026-11-01 (unreleased, 0.4.0)
+
+- **#1** Restore restores the Codex adapter only while Codex is actively enrolled or
+  this adapter's bytes are still installed. New Codex receipts record `packageVersion`;
+  files replaced after a version change are superseded, and other changes are still
+  refused. Test: Codex restore, package update, Claude enroll, restore succeeds, Codex
+  re-sync against the updated package. Test: a same-version edit is refused.
+- **#2** Not changed in code; the README gives the manual recovery.
+- **#3** The Codex and Claude patches feature-detect `readCodexBaseInstructions` and
+  `readClaudeManagedPrompt`, falling back to unmanaged behavior on an older runtime
+  (tests for both). A restored enrollment is saved as schema 1 with a `runtimes` field
+  0.3.x ignores (0.3.x `parseEnrollment` checks only `schema`, `active` and
+  `previousPointer`); an active Claude enrollment stays schema 2. README has the rollback
+  procedure.
+- **#4** Detection follows OpenClaw's `resolveAgentEffectiveModelPrimary` and
+  `resolveSelectedModelFallbacksOverride`; allowed-model maps still count.
+- **#5** The startup "not ready" error requires active enrollment (test: no error after
+  restore).
+- **#6** Restore validates adapter files, backups and the pointer, then pauses
+  enrollment, then restores adapters. Test: a foreign edit or foreign pointer leaves
+  enrollment, Codex and Claude unchanged.
+- **#7** The managed Claude branch keeps `nativeCommandGuidanceLines`.
+- **#8** The unreachable `promptMode`/`sandboxInfo` check is removed.
+- **#9** `scripts/validate-claude-layout.mjs` asserts `checkClaudeAdoption` passes for
+  six real renders. It passes on OpenClaw 2026.10.6 and 2026.10.9.
+- **#10** Documented as a known limitation in the README.
+- `npm run preflight` (Node 24.22.1): 55 tests, both Inspector checks (same two advisory
+  gaps), package validation. Real `@openclaw/codex` 2026.10.5 and 2026.10.9 patch
+  (thread wrapper present, receipt version recorded) and pass `node --check`; 2026.9.9 is
+  refused.
+
+## Live identity files — 2026-11-01 (unreleased, 0.4.0)
+
+SOUL.md, IDENTITY.md, USER.md (shared and the session's selected personal file) and
+AGENTS.md are no longer snapshotted; both runtimes deliver them live every turn.
+
+- **Codex.** The reviewed workspace-context wrapper hands the host-rendered persona to
+  the reviewed `buildDeveloperInstructions` patch, which places it after the fleet
+  policy in the thread developer instructions (not the parent-only or refreshable
+  carriers). Tests: an edit appears in the next turn's thread instructions; personal
+  overlay included; memory stays suppressed (skills: see the live catalog entry above);
+  the relay is non-enumerable; a fork that never assembled workspace context starts
+  without persona.
+- **Codex floor raised to 2026.10.5.** Checked every published `@openclaw/codex`
+  release: 2026.10.5, 10.6, 10.7, 10.8 and 10.9 have byte-identical reviewed context
+  and operational functions; 2026.9.9 still uses the turn-scoped layout and
+  2026.10.1–10.4 differ. The real 10.5–10.9 packages patch, pass `node --check`, and
+  call the workspace loader before the developer builder on the same attempt object;
+  9.9, 10.1 and 10.4 are refused. Older-layout code paths and their tests were removed;
+  0.2.0 single-file receipts still restore.
+- **Claude CLI.** The render patch now drops only the MEMORY body; OpenClaw's project
+  context carries SOUL, IDENTITY, shared and personal USER with its own wording. The
+  real-layout script passes on 2026.10.6 and 2026.10.9 with live files present and
+  disk copies absent.
+- **Claude Code subagents** do not receive the appended system prompt (Claude Code
+  2.1.316: parent saw a marker, a native subagent reported it absent), so they see
+  neither fleet policy nor persona.
+- Dev dependency moved to `openclaw@2026.10.9` (requires Node >=24.22; CI uses 24).
+  `scripts/check-package.mjs` accepts npm 11's keyed `pack --json` output.
+- `npm run preflight` on Node 24.22.1: **52 tests**, both Inspector checks (same two
+  advisory gaps), package validation (35 files).
+
+- **Live fleet policy.** The policy stays the prefix of the Codex base file (the fallback
+  if the adapter is missing). The reviewed `buildCodexThreadConfiguration` is wrapped to
+  send the verified file as `baseInstructions` on thread start, resume and fork. Checked
+  against the real 2026.10.9 code: warm threads compare a request fingerprint that
+  includes `baseInstructions` and resume on mismatch; incognito threads compare only
+  developer instructions, so they keep their starting revision. Checked live with Codex
+  CLI 0.166.0 app-server, and again with **0.160.0**, the app-server version pinned by
+  `@openclaw/codex` 2026.10.5–10.9 (`CODEX_APP_SERVER_VERSION`). In both, a thread started
+  with base A answered A, the same thread resumed with base B answered B, and a resume
+  without a base fell back to the configured base. The real 10.5–10.9 packages patch and pass `node --check`.
+
+**Not yet validated live:** a policy refresh or persona edit reaching an existing
+Codex thread through the policy handoff on the next turn, a resumed Claude conversation
+picking up a new revision, native Codex children seeing persona, compaction
+retention, and the incognito-thread refusal after a persona edit.
+
+## Claude CLI fleet policy (issue #9) — 2026-11-01 (unreleased, 0.4.0)
+
+Implements the revised plan in issue #9. Baseline f72b415.
+
+**Automated (this repository).** `npm run preflight` passed: TypeScript build,
+**56 tests**, both Plugin Inspector checks (the same two advisory proof gaps, zero
+live issues) and package validation (**35 files**). New coverage:
+
+- Claude assembly adapter against the exact 2026.10.6 function bytes: patches only
+  the reviewed chain, re-syncs from backups, refuses changed functions, duplicate
+  definitions and foreign edits, restores exact bytes, and after a simulated
+  OpenClaw update skips the updater's chunks and re-syncs against renamed ones.
+- The patched `buildCliAgentSystemPrompt` manages only the target agent on
+  `claude-cli/`; other agents, other CLI backends, `anthropic/` displays and
+  disabled config stay upstream; a tampered snapshot aborts.
+- Claude-only lifecycle: no `config.toml`, schema-2 state, refresh without a
+  pointer (`nextClaudeProcess`, no Codex new-session guidance), restore. Adding Codex
+  later captures and restores its pointer; Codex-only state keeps schema 1.
+- Detection through a supplied `resolveModelRuntimePolicy` and legacy refs. The
+  CLI refuses sync with no detected runtime or without the gate grant, before any
+  fetch or write.
+- Gate: runs are marked from the preparation hook context. Other runtimes,
+  agents and unprepared runs pass. Unenrolled runs pass and are reported. A missing
+  patch, an altered policy, a missing prompt or tampered state block; prompt text is
+  never logged. No hooks are registered without the grant or with prompt injection
+  disabled.
+- Codex refreshable wrapper keeps only the personal overlay in `personaInstructions`.
+  Shared persona and memory stay suppressed; other agents stay upstream.
+
+**Review fixes (Codex review, each reproduced first by an independent check).**
+Each regression test below fails against the pre-fix build.
+
+- Gate fallback: a Claude attempt that fails between preparation and execution no
+  longer gates a non-Claude fallback under the same run ID. Each preparation
+  replaces the mark, and gate contexts naming a non-Claude provider pass, including
+  attempts that skip prompt-build. Claude after a non-Claude attempt is still gated.
+- Runtime removal: a receipt kept by restore no longer re-selects its runtime.
+  Ownership comes from disk. Tested: enroll Claude, interrupted restore (refused with
+  "finish restore"), completed restore, then Codex-only sync without the grant
+  leaves core untouched; the reverse; a different Codex package or OpenClaw root
+  after a clean restore; and partial, superseded and changed ownership states.
+- Codex settings: unsupported `appServer` settings no longer block a first
+  Claude-only enrollment, status or restore. Sync still rejects them when it selects
+  Codex. Status and startup report them for a Codex enrollment. Restore still
+  refuses foreign edits under unsupported settings.
+- Both real layouts (2026.10.6, 2026.10.9) re-validated after these changes.
+
+**Real OpenClaw core.** `scripts/validate-claude-layout.mjs` passed against
+disposable npm installs of **openclaw 2026.10.6 and 2026.10.9** (different chunk
+names, byte-identical reviewed functions). Through the real assembly: fleet policy
+once; frozen SOUL/IDENTITY/shared USER; live AGENTS, TOOLS and the personal overlay;
+no live SOUL, shared USER or MEMORY body; no frozen catalog; generic identity,
+Execution Bias, Care, OpenClaw Control, Tool Call Style and Silent Replies absent;
+Messaging, Output Directives, Authorized Senders, Runtime, unknown extra context and
+incognito text retained. A live session catalog survives when no native mount
+exists. Other backends/agents and restored enrollment render upstream. After
+restore the patched chunks match `dist/postinstall-content-inventory.json`.
+
+**Fleet policy.** Runtime-neutral, capability-aware wording is prepared on the
+`fleet-prompt` branch `feat/runtime-neutral-policy` (sections 00, 04, 05, 06, 07,
+08; dev and prod identical; `npm test` passed, 5 tests). It is not deployed.
+
+**Not yet validated (required before advertising Claude support):** a live Gateway
+on 2026.10.6+ with Claude CLI 2.1.x. That means fresh native `prompt_snapshot`
+captures; real native skill invocation through the `openclaw-skills` mount;
+follow-up, reuse and resume; prompt refresh; personal-context changes; compaction;
+applicable delivery modes; the gate blocking after a real update; restore; and
+OpenClaw update and rollback with the patch present on a disposable install. The
+Codex personal-overlay change also needs a live parent-local relay check. Messaging
+mechanics are kept through OpenClaw's own builder, which still includes two short
+routing lines (subagent arguments, user-authorized CLI/API use).
+
 ## Remote-only follow-up — 2026-11-01 (unreleased)
 
 This follow-up supersedes the bundled-template and dev-only state described in

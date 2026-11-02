@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../dist/index.js";
+import { readCodexBaseInstructions } from "../dist/runtime.js";
 import { compilePrompt } from "../dist/compiler.js";
 import { sha256, syncPrompt } from "../dist/manager.js";
 import { readPromptPointer } from "../dist/toml.js";
@@ -28,7 +29,7 @@ test("automatic refresh logs every failing component safely while successful com
   const root = await mkdtemp(join(await realpath(tmpdir()), "refresh-diagnostics-"));
   const url = "https://example.test/prompt";
   const initial = "INITIAL BASE";
-  const compiled = await compilePrompt(initial, root, { prompt: "", count: 0 });
+  const compiled = await compilePrompt(initial, root);
   compiled.bundle.remotePrompt = { url, revision: sha256(initial), checkedAt: 0 };
   await syncPrompt({ agentDir: root, ...compiled });
   const home = join(root, "codex-home");
@@ -66,17 +67,63 @@ test("automatic refresh logs every failing component safely while successful com
   assert.equal(await readFile(join(home, ".unblock-codex-prompt-bundle.json"), "utf8"), goodBundle);
 });
 
-test("service accepts operator-selected stdio launchers and args without enrolling; rejects homes/transports it cannot manage", async () => {
+test("a Claude-only enrollment schedules its daily refresh from the oldest enrolled checkedAt, not immediately on every start", { timeout: 20_000 }, async t => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const HOUR = 60 * 60 * 1000;
+  const now = 10 * DAY;
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now });
+  const root = await mkdtemp(join(await realpath(tmpdir()), "claude-schedule-"));
+  const url = "https://example.test/prompt";
+  // Checked one hour ago: the next refresh is due 23 hours from now.
+  const compiled = await compilePrompt(null, root, { text: "CLAUDE A", url: `${url}?runtime=claude`, revision: sha256("CLAUDE A"), checkedAt: now - HOUR });
+  await syncPrompt({ agentDir: root, ...compiled }, { runtimes: ["claude-cli"] });
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async target => {
+    requests.push(String(target));
+    return new Response("CLAUDE B", { headers: { "content-type": "text/plain", "x-prompt-revision": sha256("CLAUDE B"), "x-prompt-runtime": "claude" } });
+  };
+  let service;
+  plugin.register({ registerService: value => { service = value; }, registerCli() {} });
+  t.after(async () => { await service?.stop(); globalThis.fetch = originalFetch; });
+  const logs = [];
+  let refreshed = Promise.withResolvers();
+  const log = value => { logs.push(value); if (/daily refresh/.test(value)) refreshed.resolve(value); };
+  const config = { agents: { list: [{ id: "main", agentDir: root, workspace: root }] }, plugins: { entries: {
+    "unblock-codex-prompt": { enabled: true, hooks: { allowConversationAccess: true }, config: { frozenContext: true, promptUrl: url } },
+  } } };
+  await service.start({ config, logger: { info: log, error: log } });
+  assert.ok(logs.some(line => line.includes("daily prompt/catalog refresh scheduled")));
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(0); await settle();
+  assert.deepEqual(requests, [], "a fresh Claude policy is not refreshed at startup");
+  t.mock.timers.tick(DAY - HOUR - 1); await settle();
+  assert.deepEqual(requests, []);
+  t.mock.timers.tick(1);
+  assert.match(await refreshed.promise, /daily refresh \{.*"claudeRevision"/);
+  assert.deepEqual(requests, [`${url}?runtime=claude`]);
+  // Once refreshed, the next one is a full day after it.
+  refreshed = Promise.withResolvers();
+  await settle();
+  t.mock.timers.tick(DAY - 1); await settle();
+  assert.equal(requests.length, 1);
+  t.mock.timers.tick(1);
+  await refreshed.promise;
+  assert.equal(requests.length, 2);
+});
+
+test("service accepts operator-selected launchers and args without enrolling; unsupported Codex homes/transports do not block an unenrolled start", async () => {
   const root = await mkdtemp(join(await realpath(tmpdir()), "prompt-launchers-"));
   const cases = [
     { appServer: {} },
     { appServer: { command: "/operator/bin/codex" } },
     { appServer: { args: ["app-server", "--listen", "stdio://"] } },
     { appServer: { command: "/operator/bin/codex", args: ["app-server", "-c", "service_tier=\"fast\""] } },
-    { appServer: { transport: "websocket" }, error: /agent-scoped local stdio/ },
-    { appServer: { homeScope: "user" }, error: /agent-scoped local stdio/ },
+    // Sync validates these once it selects Codex; nothing is managed here yet.
+    { appServer: { transport: "websocket" } },
+    { appServer: { homeScope: "user" } },
   ];
-  for (const { appServer, error } of cases) {
+  for (const { appServer } of cases) {
     let service;
     plugin.register({ registerService: value => { service = value; }, registerCli() {} });
     const logs = [];
@@ -88,13 +135,10 @@ test("service accepts operator-selected stdio launchers and args without enrolli
       } },
     };
     const before = structuredClone(config);
-    const start = service.start({ config, logger: { info: value => logs.push(value), error: value => logs.push(value) } });
-    if (error) await assert.rejects(start, error);
-    else {
-      await start;
-      assert.equal(JSON.parse(logs[0].slice("unblock-codex-prompt: ".length)).enrolled, false);
-      await service.stop();
-    }
+    await service.start({ config, logger: { info: value => logs.push(value), error: value => logs.push(value) } });
+    assert.equal(JSON.parse(logs[0].slice("unblock-codex-prompt: ".length)).enrolled, false);
+    assert.equal(logs.length, 1);
+    await service.stop();
     assert.deepEqual(config, before);
     assert.deepEqual(await readdir(root), []);
   }
@@ -137,9 +181,10 @@ test("remote-only CLI sync installs both prompt replacements; refresh and restor
   const promptPath = join(home, "unblock-codex-prompt.md");
   assert.equal(readPromptPointer(await readFile(join(home, "config.toml"), "utf8")), promptPath);
   const prompt = await readFile(promptPath, "utf8");
+  // The base file carries the fleet policy; identity reaches Codex live, never through it.
   assert.ok(prompt.startsWith(remoteText));
-  assert.match(prompt, /AGENT IDENTITY A/);
-  assert.doesNotMatch(prompt, /Legacy name/);
+  assert.doesNotMatch(prompt, /AGENT IDENTITY A|Legacy name/);
+  assert.equal(readCodexBaseInstructions(agentDir), prompt);
   const adapter = await import(pathToFileURL(join(packageDir, "dist", "thread-requests-reviewed.mjs")));
   assert.equal(adapter.buildDeveloperInstructions({ agentId: "main", config }), "");
   assert.equal(adapter.buildDeveloperInstructions({ agentId: "main", config, extraSystemPrompt: "ROUTING FACT" }), "ROUTING FACT");
@@ -147,9 +192,9 @@ test("remote-only CLI sync installs both prompt replacements; refresh and restor
   remoteText = "REMOTE B";
   await run("refresh");
   const updated = await readFile(promptPath, "utf8");
-  assert.match(updated, /^REMOTE B/);
-  assert.match(updated, /AGENT IDENTITY A/);
-  assert.doesNotMatch(updated, /AGENT IDENTITY B/);
+  assert.equal(updated, "REMOTE B" + prompt.slice(prompt.indexOf("\n\n## Memory reference\n")));
+  // The patched thread requests send this file as base instructions on the next start/resume.
+  assert.equal(readCodexBaseInstructions(agentDir), updated);
   globalThis.fetch = async () => { throw new Error("offline"); };
   await assert.rejects(run("refresh"), /Refresh incomplete/);
   assert.equal(await readFile(promptPath, "utf8"), updated);

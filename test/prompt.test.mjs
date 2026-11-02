@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { readPromptPointer, setPromptPointer } from "../dist/toml.js";
-import { promptStatus, restorePrompt, syncPrompt } from "../dist/manager.js";
+import { promptStatus, restorePrompt, sha256, syncPrompt } from "../dist/manager.js";
 
 async function fixture(config = '# retained\nmodel_instructions_file = "/original/prompt.md" # original\n[features]\ncode_mode = true\n') {
   const agentDir = await mkdtemp(join(await realpath(tmpdir()), "unblock-codex-prompt-test-"));
@@ -36,7 +36,8 @@ test("status is read-only; adoption is explicit and keeps original pointer for r
   assert.equal(await readFile(f.configPath, "utf8"), before);
   assert.equal((await syncPrompt(f, { adopt: true })).changed, true);
   const status = await promptStatus(f);
-  assert.equal(status.pointerMatches && status.promptMatches && status.enrolled, true);
+  assert.equal(status.pointerMatches && status.enrolled, true);
+  assert.equal(status.actualSha256, sha256(f.prompt));
   assert.equal(status.runtimeVerified, false);
   assert.equal((await stat(f.configPath)).mode & 0o777, 0o600);
   assert.equal((await stat(status.promptPath)).mode & 0o777, 0o600);

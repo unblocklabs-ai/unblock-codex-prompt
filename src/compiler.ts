@@ -1,9 +1,8 @@
-import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/plugin-entry";
-import { readOptional, sha256, type FrozenBundle } from "./manager.js";
+import { fileURLToPath } from "node:url";
+import { MEMORY_REFERENCE_HEADER, readOptional, type ClaudePolicy, type FrozenBundle } from "./manager.js";
 import { assertSupportedVersion } from "./compatibility.js";
+import { policyFetchers } from "./remote.js";
 
 export async function openclawRoot() {
   let directory = dirname(fileURLToPath(import.meta.resolve("openclaw/plugin-sdk/agent-runtime")));
@@ -22,35 +21,44 @@ export async function openclawRoot() {
   }
 }
 
-// OpenClaw has no public catalog-building SDK. Validate this internal export,
-// retaining its eligibility, agent allowlist, prompt visibility and size limits.
-export async function buildSkillsCatalog(config: OpenClawConfig, agentId: string, workspaceDir: string) {
-  const dist = join(await openclawRoot(), "dist");
-  const names = (await readdir(dist)).filter(name => /^workspace-skill-prompt-[\w-]+\.m?js$/u.test(name));
-  if (names.length !== 1) throw new Error("Unsupported OpenClaw skills module layout");
-  const path = join(dist, names[0]!);
-  const source = await readFile(path, "utf8");
-  const exports = [...source.matchAll(/\bbuildSkillSnapshot as ([\w$]+)\b/gu)];
-  if (exports.length !== 1) throw new Error("Unsupported OpenClaw skills export");
-  const module: Record<string, unknown> = await import(pathToFileURL(path).href);
-  const buildSnapshot = module[exports[0]![1]!];
-  if (typeof buildSnapshot !== "function") throw new Error("Missing OpenClaw skill snapshot builder");
-  const result: unknown = await buildSnapshot(workspaceDir, { config, agentId });
-  if (!result || typeof result !== "object" || !("prompt" in result) || typeof result.prompt !== "string" ||
-      !("resolvedSkills" in result) || !Array.isArray(result.resolvedSkills)) throw new Error("Unsupported OpenClaw skill snapshot result");
-  return { prompt: result.prompt, count: result.resolvedSkills.length };
+/**
+ * Shared agent context, identical for every runtime: a pointer to the memory tools and the
+ * workspace MEMORY.md. Identity and workspace files reach each runtime through its own assembly.
+ */
+function agentContextText(workspaceDir: string) {
+  return `${MEMORY_REFERENCE_HEADER.trimStart()}When prior context matters, use the available memory tools and follow their schemas. If retrieval is unavailable, say so; do not invent results. The workspace memory reference is ${join(workspaceDir, "MEMORY.md")}. Read it only when the active session's privacy policy permits; do not expose private memory in group or customer conversations.`;
 }
 
-export async function compilePrompt(base: string, workspaceDir: string, catalog: { prompt: string; count: number }) {
-  const sources: FrozenBundle["sources"] = [];
-  const sections = [base.trim(), "## Frozen agent context\nThis context is a local snapshot, refreshed explicitly by the operator. Native AGENTS.md, native skills, actual tool schemas and current session context remain separate. This snapshot does not grant tools or permissions."];
-  for (const name of ["SOUL.md", "IDENTITY.md", "USER.md"]) {
-    const content = await readOptional(join(workspaceDir, name));
-    sources.push({ name, sha256: content === null ? null : sha256(content) });
-    if (content?.trim()) sections.push(`### ${name}\n${content.trim()}`);
-  }
-  sections.push(`## Frozen memory reference\nWhen prior context matters, use the currently available memory tools and follow their schemas. If retrieval is unavailable, say so; do not invent results. The workspace memory reference is ${join(workspaceDir, "MEMORY.md")}. Its contents are not included here. Read it only when the active session's privacy policy permits; do not expose private memory in group or customer conversations.`);
-  sources.push({ name: "OpenClaw skills catalog", sha256: sha256(catalog.prompt) });
-  sections.push(`## Frozen OpenClaw skills catalog\nThis is the approved agent-workspace catalog at sync time, not a promise that credentials or tools remain available. Session-local skill selection and execution-directory skill discovery do not refresh this snapshot. Use the native catalog separately.\n\n${catalog.prompt.trim() || "No eligible model-visible OpenClaw skills at sync time."}`);
-  return { prompt: `${sections.join("\n\n")}\n`, bundle: { schema: 1 as const, policy: "", sources, skillCount: catalog.count, basePromptLength: base.trim().length } };
+/**
+ * Compile the prompt file and bundle for the enrolled runtimes. Skills are never compiled: both
+ * runtimes receive OpenClaw's per-session skills catalog through their own assembly.
+ * - Codex (`base` given): the file is the Codex policy followed by the agent context. The bundle
+ *   keeps `policy: ""`.
+ * - Claude (`claude` given): the bundle also stores the Claude policy and the agent context text.
+ * - Claude only (`base` null): nothing Codex-specific is built. The file holds just the agent
+ *   context, so its hash still anchors the bundle and refresh has no prefix to replace.
+ */
+export async function compilePrompt(base: string | null, workspaceDir: string, claude?: ClaudePolicy) {
+  if (base === null && !claude) throw new Error("compilePrompt needs a Codex base, a Claude policy, or both");
+  const agentContext = agentContextText(workspaceDir);
+  const claudeFields = claude ? { claudePolicy: { ...claude, text: claude.text.trim() }, agentContext } : {};
+  if (base === null) return { prompt: agentContext, bundle: { schema: 1 as const, policy: "", ...claudeFields } satisfies FrozenBundle };
+  return { prompt: `${base.trim()}\n\n${agentContext}\n`, bundle: { schema: 1 as const, policy: "",
+    basePromptLength: base.trim().length, ...claudeFields } satisfies FrozenBundle };
+}
+
+/**
+ * Everything a sync needs before it may write: every enrolled runtime's policy is fetched first
+ * (Codex without `runtime`, Claude with runtime=claude). Any failure throws here, so nothing has
+ * been written.
+ */
+export async function fetchAndCompile(options: { codex: boolean; claude: boolean; promptUrl: string; workspaceDir: string;
+  request?: typeof fetch; now?: number }) {
+  const fetchers = policyFetchers(options.promptUrl, options.request);
+  const [remote, claudeRemote] = await Promise.all([options.codex ? fetchers.codex() : undefined, options.claude ? fetchers.claude() : undefined]);
+  const checkedAt = options.now ?? Date.now();
+  const claudePolicy = claudeRemote ? { text: claudeRemote.prompt, ...claudeRemote.source, checkedAt } : undefined;
+  const compiled = await compilePrompt(remote?.prompt ?? null, options.workspaceDir, claudePolicy);
+  if (remote) Object.assign(compiled.bundle, { remotePrompt: { ...remote.source, checkedAt } });
+  return { compiled, remote: remote?.source, claudePolicy: claudePolicy && { url: claudePolicy.url, revision: claudePolicy.revision, checkedAt } };
 }
