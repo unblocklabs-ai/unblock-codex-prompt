@@ -1,6 +1,6 @@
 {
   "name": "@unblocklabs/unblock-codex-prompt",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Manage a shared fleet prompt for an OpenClaw agent on Codex and Claude CLI.",
   "type": "module",
   "main": "./dist/index.js",
@@ -8,7 +8,7 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["dist/", "openclaw.plugin.json", "README.md", "RELEASING.md", "LICENSE"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-codex-bridge.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "plugin:inspect": "plugin-inspector check --config plugin-inspector.config.json --no-openclaw",
@@ -21,6 +21,7 @@
   "devDependencies": {
     "@openclaw/plugin-inspector": "^0.3.25",
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
     "openclaw": "2026.10.9",
     "typescript": "^5.9.3"
   },

@@ -6,6 +6,7 @@ import { applyPatchedRestore, beginPatch, installPatch, openPatchedFiles, patche
 import { openclawRoot } from "./compiler.js";
 import { assertSupportedVersion, MINIMUM_OPENCLAW } from "./compatibility.js";
 import { managedTargetSource } from "./managed-target.js";
+import { codexBridgeSource } from "./codex-bridge-source.js";
 
 const MARKER = "// unblock-codex-prompt bridge v1";
 const BUNDLE_NAME = /^(?:thread-(?:lifecycle|requests|policy)|dynamic-tools|attempt-workspace-context|run-attempt)-[\w-]+\.m?js$/u;
@@ -100,12 +101,19 @@ export async function codexAdapterOwnership(agentDir: string) {
   return patchedFilesOwnership(codexFiles(agentDir));
 }
 
-function bridgePrefix(agentDir: string, agentId: string, runtimePath: string) {
+function bridgePrefix(agentDir: string, agentId: string) {
   return `${MARKER}
 import { createRequire as unblockPromptCreateRequire } from "node:module";
-const unblockPromptRequire = unblockPromptCreateRequire(import.meta.url);
-function unblockNormalizeAdditions(text) { return unblockPromptRequire(${JSON.stringify(runtimePath)}).normalizeOpenClawAdditions(text); }
-function unblockNormalizeTurnContext(context) { return unblockPromptRequire(${JSON.stringify(runtimePath)}).normalizeOpenClawTurnContext(context); }
+// Keep the runtime with the patch; this require resolves only Node built-ins.
+let unblockRuntime;
+function unblockLoadBridge() {
+  return unblockRuntime ??= ((require) => {
+${codexBridgeSource}
+    return unblockBridge;
+  })(unblockPromptCreateRequire(import.meta.url));
+}
+function unblockNormalizeAdditions(text) { return unblockLoadBridge().normalizeOpenClawAdditions(text); }
+function unblockNormalizeTurnContext(context) { return unblockLoadBridge().normalizeOpenClawTurnContext(context); }
 // One non-enumerable live-context relay on the attempt params: producers that run first in the
 // reviewed attempt order record their host-rendered text, buildDeveloperInstructions reads it.
 // The registered symbol works across bundles and realms; copies of params never carry it.
@@ -114,20 +122,17 @@ function unblockRelay(params, part, text) {
   Object.defineProperty(params, unblockLiveKey, { value: { ...params[unblockLiveKey], [part]: text }, configurable: true, writable: true, enumerable: false });
 }
 function unblockBaseInstructions(params) {
-  if (unblockFrozenPolicy(params) === null) return null;
-  // After a plugin rollback without restore the older runtime lacks this export: Codex then
-  // reads the same policy from model_instructions_file, as before this bridge version.
-  const runtime = unblockPromptRequire(${JSON.stringify(runtimePath)});
-  return typeof runtime.readCodexBaseInstructions === "function" ? runtime.readCodexBaseInstructions(${JSON.stringify(agentDir)}) : null;
+  if (!unblockManagedTarget(params)) return null;
+  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)});
 }
 ${managedTargetSource({ name: "unblockManagedTarget", agentId, targetChanged: "Frozen bridge target changed; restore and reinstall the adapter" })}function unblockFrozenPolicy(params) {
   if (!unblockManagedTarget(params)) return null;
-  return unblockPromptRequire(${JSON.stringify(runtimePath)}).readFrozenPolicy(${JSON.stringify(agentDir)});
+  return unblockLoadBridge().readFrozenPolicy(${JSON.stringify(agentDir)});
 }
 `;
 }
 
-export function patchAdapterSources(sources: string[], agentDir: string, agentId: string, runtimePath: string) {
+export function patchAdapterSources(sources: string[], agentDir: string, agentId: string) {
   if (sources.some(source => source.includes(MARKER))) throw new Error("Unsupported Codex adapter shape: already patched");
   const functions = sources.flatMap((source, bundle) =>
     parse(source, { ecmaVersion: "latest", sourceType: "module" }).body
@@ -142,7 +147,7 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
       !functions.some(fn => fn.node.id?.name === "buildCodexWorkspaceBootstrapContext")) {
     throw new Error(`Unsupported Codex context layout; live agent context requires @openclaw/codex >=${MINIMUM_OPENCLAW}`);
   }
-  const prefix = bridgePrefix(agentDir, agentId, runtimePath);
+  const prefix = bridgePrefix(agentDir, agentId);
   return patchOperationalAdapter(patchRefreshableAdapter(sources, find, prefix), prefix);
 }
 
@@ -254,9 +259,8 @@ function patchOperationalAdapter(sources: string[], prefix: string) {
   });
 }
 
-export async function prepareAdapter(agentDir: string, agentId: string, suppliedDir: string | undefined, runtimePath: string) {
+export async function prepareAdapter(agentDir: string, agentId: string, suppliedDir: string | undefined) {
   await openclawRoot();
-  if (!isAbsolute(runtimePath) || await readOptional(runtimePath) === null) throw new Error("Missing durable plugin runtime");
   const set = codexFiles(agentDir);
   const opened = await openPatchedFiles(set);
   // A cleared receipt still remembers the package for a sync without --codex-plugin-dir.
@@ -277,7 +281,7 @@ export async function prepareAdapter(agentDir: string, agentId: string, supplied
   paths.sort();
   if (!paths.length) throw new Error("Unsupported Codex bundle layout");
   const originals = await Promise.all(paths.map(patch.read));
-  const patches = patchAdapterSources(originals, agentDir, agentId, runtimePath);
+  const patches = patchAdapterSources(originals, agentDir, agentId);
   const { files, entries: receiptEntries, previousReceipt, staleBackups } =
     patch.finish(new Map(paths.flatMap((path, index) => patches[index] === originals[index] ? [] : [[path, patches[index]!] as const])));
   const receipt = { schema: 2 as const, packageDir, packageVersion: version, files: receiptEntries };

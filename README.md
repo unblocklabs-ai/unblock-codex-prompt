@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.5.1.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.5.2.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -98,10 +98,10 @@ delivery to current facts and scopes meaningful exec overrides to OpenClaw Gatew
 exec; inherited steady-state defaults are omitted. Unrecognized additions are
 preserved, not removed by heading. Changed operational functions require review
 before sync.
-The installer backs up and tracks every
-patched bundle; old single-file receipts remain restorable. Runtime module paths
-come from the loader's selected entry, never its temporary execution capture.
-It validates private seams and is not a promise of compatibility with unseen layouts.
+The installer backs up and tracks every patched bundle; old single-file receipts
+remain restorable. The bridge code is embedded in the patched bundles, so removing
+an older prompt-plugin install doesn't break Codex turns. The installer validates
+private seams and refuses unreviewed layouts.
 The skills catalog is OpenClaw's own per-session snapshot, with its eligibility,
 allowlist, visibility and size-limit logic; the plugin neither adds nor removes skills.
 
@@ -343,7 +343,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.1.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.2.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -435,6 +435,11 @@ the new file no longer carries the frozen one, so Codex turns in that window hav
 skills catalog. Drain the agent before sync and restart right after it.
 The plugin never interrupts or resets sessions. Capture an actual request after
 provisioning or upgrades; `status` is disk evidence, not live adoption.
+
+**Upgrading from 0.5.1 or earlier:** Run `openclaw codex-prompt sync` once with the
+new plugin, then restart while idle. Sync can replace the old Codex patch even if
+the prompt-plugin directory it references is already gone. Installing the update
+alone does not rewrite the patch.
 
 For this instruction cleanup, run explicit `sync` to install the new adapter and
 empty remote policy, refresh the enabled catalog, then restart while idle and use
@@ -593,17 +598,16 @@ unchanged between 0.4 and 0.5.
 3. Install the 0.3.x plugin, then run its `sync` if you want it to manage the agent again.
 
 0.3.x cannot manage Claude CLI agents. Any enrollment that includes Codex, with or
-without Claude, and any restored enrollment are saved in the format 0.3.x reads. If the
-plugin is rolled back without restoring first, the Codex patch finds the older runtime
-and falls back instead of failing turns: 0.3.x keeps managing Codex, which reads the
-policy from its base file, and Claude renders OpenClaw's normal prompt (0.3.x registers
-no Claude hook). An active Claude-only enrollment is refused by 0.3.x; install 0.5 again
+without Claude, and any restored enrollment are saved in the format 0.3.x reads.
+An installed self-contained Codex patch keeps its existing behavior until restored
+or re-synced; rolling back the plugin alone does not replace it. Claude renders
+OpenClaw's normal prompt (0.3.x registers no Claude hook). An active Claude-only
+enrollment is refused by 0.3.x; install 0.5 again
 and restore. 0.3.x rewrites the state without the Claude runtime when it syncs or
 restores. A 0.4 or 0.5 snapshot uses a heading 0.3.x's daily refresh does not recognize, so
 after rolling back, run 0.3.x's `sync` once to rebuild it. That sync reinstalls 0.3.x's
 Codex patch and its frozen skills catalog; drain and restart after it, as after any
-sync. Until then the current Codex patch keeps relaying the live catalog (the relay is
-inline in the patch, so it does not depend on the plugin runtime).
+sync.
 
 ## Safety and scope
 
@@ -624,7 +628,7 @@ inline in the patch, so it does not depend on the plugin runtime).
 
 ```sh
 npm run preflight
-npm run release:check -- v0.5.1
+npm run release:check -- v0.5.2
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -634,7 +638,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.1 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.2 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

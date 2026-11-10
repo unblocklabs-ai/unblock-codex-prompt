@@ -1,33 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, writeFile, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { patchAdapterSources, prepareAdapter, installAdapter, planAdapterRestore, applyAdapterRestore, adapterStatus } from "../dist/adapter.js";
+import { restorePrompt, syncPrompt } from "../dist/manager.js";
 const restoreAdapter = async agentDir => applyAdapterRestore(await planAdapterRestore(agentDir));
 import * as runtime from "../dist/runtime.js";
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8"));
 const sources = Object.values(fixture.bundles);
-const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
 
-test("refreshable layout delivers the live skills catalog and persona in thread developer instructions; memory stays suppressed across creation, reuse, parent-local inference and compaction", async () => {
-  const patched = patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js");
-  // Skills are renamed and wrapped, not suppressed; one relay key replaces the persona carrier.
-  assert.equal(patched.filter(source => source.includes("function unblockOriginalSkillsInstructions(")).length, 1);
-  assert.equal(patched.some(source => source.includes("unblock-codex-prompt.persona")), false);
-  let policy = "";
-  let olderRuntime = false;
+async function enroll(t, prompt, policy = "") {
+  const agentDir = await mkdtemp(join(await realpath(tmpdir()), "codex-bridge-context-"));
+  t.after(() => rm(agentDir, { recursive: true }));
+  await syncPrompt({ agentDir, prompt, bundle: { schema: 1, policy } });
+  return agentDir;
+}
+
+test("refreshable layout delivers the live skills catalog and persona in thread developer instructions without a prompt-plugin install", async t => {
+  const agentDir = await enroll(t, "FLEET BASE A");
+  const patched = patchAdapterSources(sources, agentDir, "main");
   let liveTag = "A";
   let harnessContext = true;
   const handoffs = [];
   const globals = {
-    unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => {
-      if (policy instanceof Error) throw policy;
-      return policy;
-    }, readCodexBaseInstructions: olderRuntime ? undefined : () => `FLEET BASE ${liveTag}` }),
+    unblockPromptCreateRequire: createRequire,
     joinPresentSections: (...parts) => parts.filter(part => part?.trim()).join("\n\n"),
     flattenCodexDynamicToolFunctions: specs => specs.flatMap(spec => spec.tools ?? [spec]),
     normalizeLowercaseStringOrEmpty: value => value?.toLowerCase() ?? "",
@@ -103,6 +103,7 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
   assert.equal(mode.buildTurnCollaborationMode(params).settings.developer_instructions, null);
 
   liveTag = "B";
+  await syncPrompt({ agentDir, prompt: "FLEET BASE B", bundle: { schema: 1, policy: "" } });
   const reused = await render(params);
   // Catalog changes, persona edits and policy refreshes reach the next turn's thread request (a change re-syncs the thread).
   assert.equal(reused.request.developerInstructions, "## OpenClaw Skills\nLIVE SKILLS B\n\nLIVE PERSONA B\n\nCOAUTHOR\n\nROUTING");
@@ -128,20 +129,6 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
     assert.equal(ordinary.request.developerInstructions.split("LIVE SKILLS B").length, 2);
     assert.equal("baseInstructions" in ordinary.request, false);
   }
-  // A plugin rollback without restore leaves this patch calling an older runtime: Codex then
-  // reads the policy from model_instructions_file instead of failing the turn.
-  olderRuntime = true;
-  const rolledBack = await render(params);
-  assert.equal("baseInstructions" in rolledBack.request, false);
-  // The relay is inline in the patch, so the live catalog survives the rollback too.
-  assert.equal(rolledBack.request.developerInstructions, "## OpenClaw Skills\nLIVE SKILLS B\n\nLIVE PERSONA B\n\nCOAUTHOR\n\nROUTING");
-  olderRuntime = false;
-  policy = null;
-  const paused = await render(params);
-  assert.match(paused.refreshable, /LIVE SKILLS B[^]*LIVE PERSONA B/);
-  assert.match(paused.request.developerInstructions, /^You are a personal agent running inside OpenClaw\./);
-  policy = "";
-
   // A run without harness runtime context gets no skills (nor persona) from upstream, so none are relayed.
   harnessContext = false;
   const noHarness = await render({ ...params });
@@ -165,17 +152,22 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
   assert.equal(copy.developerInstructions, "COAUTHOR\n\nROUTING");
   assert.equal(owner("buildDeveloperInstructions").buildDeveloperInstructions({ ...assembled }), "COAUTHOR\n\nROUTING");
 
-  policy = new Error("Frozen prompt changed outside sync");
+  await writeFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "foreign edit");
   await assert.rejects(render(params), /Frozen prompt changed outside sync/);
+  await restorePrompt({ agentDir, prompt: "" });
+  const paused = await render(params);
+  assert.match(paused.refreshable, /LIVE SKILLS B[^]*LIVE PERSONA B/);
+  assert.match(paused.request.developerInstructions, /^You are a personal agent running inside OpenClaw\./);
 });
 
-test("managed request assembly removes only reviewed additions and preserves per-turn delivery and execution facts", async () => {
+test("managed request assembly removes only reviewed additions and preserves per-turn delivery and execution facts", async t => {
   const operational = JSON.parse(await readFile(new URL("./fixtures/adapter-operational.json", import.meta.url), "utf8"));
   const producers = JSON.parse(await readFile(new URL("./fixtures/openclaw-additions.json", import.meta.url), "utf8"));
-  const patched = patchAdapterSources([...sources, Object.values(operational.functions).join("\n")], "/agent", "main", "/plugin/runtime.js");
+  const agentDir = await enroll(t, "FLEET BASE");
+  const patched = patchAdapterSources([...sources, Object.values(operational.functions).join("\n")], agentDir, "main");
   const handoffs = [];
   const context = vm.createContext({
-    unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => "" }),
+    unblockPromptCreateRequire: createRequire,
     normalizeOptionalLowercaseString: value => value?.toLowerCase(),
     normalizeGroupActivation: value => value,
     normalizeChatChannelId: value => value,
@@ -267,7 +259,7 @@ test("managed request assembly removes only reviewed additions and preserves per
   assert.match(handoffs.at(-1), /Independently supplied native/);
   for (const name of Object.keys(operational.functions)) {
     const changed = Object.values(operational.functions).join("\n").replace(`function ${name}(`, `function renamed_${name}(`);
-    assert.throws(() => patchAdapterSources([...sources, changed], "/agent", "main", "/plugin/runtime.js"), /Unsupported Codex operational context/);
+    assert.throws(() => patchAdapterSources([...sources, changed], "/agent", "main"), /Unsupported Codex operational context/);
   }
 });
 
@@ -280,15 +272,15 @@ test("refreshable bundles install idempotently, reject upstream/foreign changes 
   await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "@openclaw/codex", version: "2026.10.8" }));
   const paths = Object.keys(fixture.bundles).map(name => join(packageDir, "dist", ".setup", name));
   for (const [i, path] of paths.entries()) await writeFile(path, sources[i]);
-  const plan = await prepareAdapter(agentDir, "main", packageDir, runtimePath);
+  const plan = await prepareAdapter(agentDir, "main", packageDir);
   await installAdapter(agentDir, plan);
   assert.equal((await adapterStatus(agentDir)).installed, true);
-  assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, runtimePath))).adapterChanged, false);
+  assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined))).adapterChanged, false);
   const operations = JSON.parse(await readFile(new URL("./fixtures/adapter-operational.json", import.meta.url), "utf8"));
   const newPath = join(packageDir, "dist", ".setup", "thread-lifecycle-operations-reviewed.mjs");
   const newSource = Object.values(operations.functions).join("\n");
   await writeFile(newPath, newSource);
-  const expanded = await prepareAdapter(agentDir, "main", undefined, runtimePath);
+  const expanded = await prepareAdapter(agentDir, "main", undefined);
   await installAdapter(agentDir, expanded);
   assert.equal((await adapterStatus(agentDir)).installed, true);
   assert.ok(expanded.files.some(file => file.path === newPath));
@@ -301,18 +293,19 @@ test("refreshable bundles install idempotently, reject upstream/foreign changes 
   assert.equal(await readFile(newPath, "utf8"), newSource);
   for (const name of ["buildCodexWorkspaceBootstrapContext", "renderCodexSkillsInstructions", "prepareCodexAttemptContext", "buildCodexParentLocalInstructions", "buildCodexThreadConfiguration", "refreshCodexThreadInstructions", "restoreCodexThreadInstructionsAfterCompaction"]) {
     const changed = sources.map(source => source.replace(`function ${name}(`, `function ${name}(/* changed upstream */`));
-    assert.throws(() => patchAdapterSources(changed, agentDir, "main", runtimePath), /Unsupported Codex context assembly/);
+    assert.throws(() => patchAdapterSources(changed, agentDir, "main"), /Unsupported Codex context assembly/);
   }
 });
 
-test("managed Codex delivers the live skills catalog and the full host persona, personal overlay included, in instructions native children inherit", async () => {
-  const patched = patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js");
+test("managed Codex delivers the live skills catalog and the full host persona, personal overlay included, in instructions native children inherit", async t => {
+  const agentDir = await enroll(t, "FLEET BASE", "FLEET");
+  const patched = patchAdapterSources(sources, agentDir, "main");
   const intro = "OpenClaw loaded these workspace instruction files from the active agent workspace. HOST PERSONAL RULE";
   const personaFiles = [{ path: "/workspace/SOUL.md", content: "LIVE SHARED SOUL" }, { path: "/workspace/users/p1/USER.md", content: "LIVE PERSONAL", personalUser: true }];
   const render = files => ["## OpenClaw Agent Soul", "", intro, "", "<AGENT_SOUL>", "", ...files.flatMap(file => [`### ${file.path}`, "", file.content, ""]), "</AGENT_SOUL>"].join("\n").trim();
   const owner = (name) => patched.find(source => source.includes(`function ${name}(`));
   const globals = {
-    unblockPromptCreateRequire: () => () => ({ ...runtime, readFrozenPolicy: () => "FLEET" }),
+    unblockPromptCreateRequire: createRequire,
     flattenCodexDynamicToolFunctions: () => [], normalizeLowercaseStringOrEmpty: value => value?.toLowerCase() ?? "",
     shouldIncludeAgentHarnessRuntimeContext: () => true, isMessageOnlyCodexSourceReply: () => false,
     resolveAgentWorkspaceMemoryRouting: () => ({ memoryToolNames: [], memoryToolRouted: false }),

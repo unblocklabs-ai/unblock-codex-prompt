@@ -3,14 +3,12 @@ import test from "node:test";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { adapterStatus, applyAdapterRestore, codexAdapterOwnership, installAdapter, planAdapterRestore, prepareAdapter } from "../dist/adapter.js";
 import { applyClaudeRestore, claudeAdapterOwnership, claudeAdapterStatus, planClaudeRestore } from "../dist/claude-adapter.js";
 import { installLegacyClaudePatch, legacyCore } from "./helpers/legacy-claude.mjs";
 
 // Ownership and restore scenarios of the shared patched-file lifecycle: the Codex adapter installs
 // through it, and the same rules remove a 0.4 Claude CLI core patch.
-const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
 const codexBundles = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8")).bundles;
 
 async function writeTree(dist, files) {
@@ -31,7 +29,7 @@ const adapters = {
       await writeTree(join(root, "dist"), Object.fromEntries(Object.entries(codexBundles).map(([name, source]) => [name.replace("-reviewed", `-${tag}`), source])));
     },
     setVersion: (root, version) => writeFile(join(root, "package.json"), JSON.stringify({ name: "@openclaw/codex", version })),
-    prepare: (agentDir, root) => prepareAdapter(agentDir, "main", root, runtimePath),
+    prepare: (agentDir, root) => prepareAdapter(agentDir, "main", root),
     install: installAdapter,
     ownership: codexAdapterOwnership,
     state: async agentDir => (await adapterStatus(agentDir)).state,

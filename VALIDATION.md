@@ -1,5 +1,24 @@
 # Validation
 
+## Self-contained Codex adapter — 2026-11-10
+
+- The request-assembly regression reproduced `MODULE_NOT_FOUND` with the old adapter
+  and passed with the embedded bridge, using real prompt state.
+- On the Brands Mac, an isolated Sarah test profile used verified copies of all six
+  installed Codex 2026.10.8 bundles and their backups. Retiring the 0.5.1 prompt-plugin
+  path stopped a fresh Codex turn before any provider request. The candidate's
+  `codex-prompt sync` migrated the existing receipt. After retiring the candidate
+  path too, a fresh native Codex turn completed against a loopback Responses fixture.
+  The captured request contained the synthetic fleet policy exactly once and the
+  live persona. Restore recovered all six original bundles byte-for-byte.
+- `npm run preflight`: 85 tests, both plugin inspections, and package validation
+  passed.
+- The approved live Brands canary installed the changed runtime files in the existing
+  npm install, synced all six Codex bundles, and restarted an idle Gateway. The
+  OpenClaw config and both policy revisions were unchanged. A fresh no-delivery
+  Sarah turn on the native Codex route returned the canary response. Gateway RPC,
+  iMessage, and Slack were healthy.
+
 ## Claude local media context — 2026-11-02 (0.5.1)
 
 - The Claude hook names `<run-workspace>/media` as the staging directory for generated

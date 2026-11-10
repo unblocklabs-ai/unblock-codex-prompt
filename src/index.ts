@@ -11,7 +11,7 @@ import { readClaudeManagedContext, readFrozenPolicy } from "./runtime.js";
 import { detectConfiguredRuntimes, runtimePolicyResolver } from "./runtimes.js";
 import { policyFetchers } from "./remote.js";
 import { parseClaudePolicy, readOptional } from "./manager.js";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { CATALOG_REFRESH_MS, catalogStatus, refreshCatalog, restoreCatalog, startCatalogRefresh } from "./catalog.js";
 import { codexSkillsStatus, refreshCodexSkills, removeCodexSkills } from "./skills.js";
 import { refreshFailure } from "./refresh-error.js";
@@ -257,11 +257,7 @@ export default definePluginEntry({
         let codexPlan;
         if (codex) {
           assertCodexAppServer(config);
-          // Captured import.meta.url paths expire with the CLI. Older hosts expose the
-          // published dist/index.js via source; newer hosts select it via runtimeSource.
-          const source = "runtimeSource" in api && typeof api.runtimeSource === "string" ? api.runtimeSource : api.source;
-          if (!isAbsolute(source) || basename(source) !== "index.js") throw new Error("Frozen sync requires the packaged plugin runtime entry");
-          codexPlan = await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir, join(dirname(source), "runtime.js"));
+          codexPlan = await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir);
         }
         // A 0.4 install patched OpenClaw core for Claude. Its restore is validated (files and
         // backups) here, before any write, and applied with this sync.

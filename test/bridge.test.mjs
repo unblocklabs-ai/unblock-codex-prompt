@@ -3,7 +3,6 @@ import test from "node:test";
 import { mkdtemp, mkdir, readFile, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { compilePrompt } from "../dist/compiler.js";
 import { patchAdapterSources, prepareAdapter, installAdapter, planAdapterRestore, applyAdapterRestore, codexAdapterOwnership, readReceipt, adapterStatus } from "../dist/adapter.js";
 import { assertSupportedVersion } from "../dist/compatibility.js";
@@ -11,7 +10,6 @@ import { legacy, modern, adapterFixture, splitAdapterFixture } from "./fixtures/
 import { syncPrompt, restorePrompt, sha256 } from "../dist/manager.js";
 import { readCodexBaseInstructions, readFrozenPolicy } from "../dist/runtime.js";
 
-const runtimePath = fileURLToPath(new URL("../dist/runtime.js", import.meta.url));
 const restoreAdapter = async agentDir => applyAdapterRestore(await planAdapterRestore(agentDir));
 const refreshable = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8")).bundles;
 
@@ -59,7 +57,7 @@ test("Codex layouts older than the reviewed live-context carriers are refused", 
   // 2026.9.2-2026.9.9 deliver persona in turn-scoped collaboration text native children never see.
   for (const sources of [[adapterFixture(legacy)], [adapterFixture(modern)], splitAdapterFixture(),
     [...splitAdapterFixture(), "async function buildCodexWorkspaceBootstrapContext(params) { return {}; }"]]) {
-    assert.throws(() => patchAdapterSources(sources, "/agent", "main", "/plugin/runtime.js"), /requires @openclaw\/codex >=2026\.10\.5/);
+    assert.throws(() => patchAdapterSources(sources, "/agent", "main"), /requires @openclaw\/codex >=2026\.10\.5/);
   }
 });
 
@@ -68,29 +66,27 @@ test("version floor permits newer stable builds, not old or prerelease builds", 
   for (const version of ["2026.9.2", "2026.9.9", "2026.10.4", "2025.12.99", "2026.10.6-beta.1", null, "garbage"]) assert.throws(() => assertSupportedVersion(version, "OpenClaw"), />=2026.10.5/);
 });
 
-test("multi-bundle installs are idempotent, refuse foreign edits and recover an interrupted runtime-path upgrade", async () => {
+test("multi-bundle installs are idempotent, refuse foreign edits and recover an interrupted re-patch", async () => {
   const root = await mkdtemp(join(await realpath(tmpdir()), "adapter-split-"));
   const agentDir = join(root, "agent");
   await mkdir(join(agentDir, "codex-home"), { recursive: true });
   const { packageDir, paths, originals } = await codexPackage(root);
-  const plan = await prepareAdapter(agentDir, "main", packageDir, runtimePath);
+  const plan = await prepareAdapter(agentDir, "main", packageDir);
   assert.ok(plan.files.length > 1);
   await installAdapter(agentDir, plan);
   assert.equal((await adapterStatus(agentDir)).installed, true);
-  assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, runtimePath))).adapterChanged, false);
+  assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined))).adapterChanged, false);
   const [first, second] = plan.files;
   await writeFile(second.path, second.patched + "// foreign change");
   await assert.rejects(restoreAdapter(agentDir), /Foreign adapter edit/);
   assert.equal(await readFile(first.path, "utf8"), first.patched);
   await writeFile(second.path, second.patched);
-  const changedRuntime = join(root, "runtime.js");
-  await writeFile(changedRuntime, await readFile(runtimePath, "utf8"));
-  const upgrade = await prepareAdapter(agentDir, "main", packageDir, changedRuntime);
+  const upgrade = await prepareAdapter(agentDir, "new-target", packageDir);
   await installAdapter(agentDir, upgrade);
   // Simulate interruption after receipt publication and only one upgraded bundle.
   await writeFile(second.path, second.patched);
   assert.equal((await adapterStatus(agentDir)).installed, false);
-  await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, changedRuntime));
+  await installAdapter(agentDir, await prepareAdapter(agentDir, "new-target", undefined));
   assert.equal((await adapterStatus(agentDir)).installed, true);
   await restoreAdapter(agentDir);
   assert.deepEqual(await Promise.all(paths.map(path => readFile(path, "utf8"))), originals);
@@ -117,11 +113,11 @@ test("0.2.0 single-file receipts still restore; re-sync of that old Codex packag
   assert.equal(await codexAdapterOwnership(agentDir), "changed");
   assert.deepEqual(await restoreAdapter(agentDir), { ownership: "changed", files: [], superseded: [], restartRequired: false });
   assert.equal(await readFile(path, "utf8"), oldPatch + "// foreign");
-  await assert.rejects(prepareAdapter(agentDir, "main", undefined, runtimePath), /another writer/);
+  await assert.rejects(prepareAdapter(agentDir, "main", undefined), /another writer/);
   await writeFile(path, oldPatch);
   await restoreAdapter(agentDir);
   assert.equal(await readFile(path, "utf8"), original);
-  await assert.rejects(prepareAdapter(agentDir, "main", undefined, runtimePath), />=2026\.10\.5/);
+  await assert.rejects(prepareAdapter(agentDir, "main", undefined), />=2026\.10\.5/);
 });
 
 test("renamed bundles retain exact backups, idempotence and foreign-edit/path protection", async () => {
@@ -129,12 +125,12 @@ test("renamed bundles retain exact backups, idempotence and foreign-edit/path pr
   const agentDir = join(root, "agent");
   await mkdir(join(agentDir, "codex-home"), { recursive: true });
   const { packageDir } = await codexPackage(root);
-  const plan = await prepareAdapter(agentDir, "main", packageDir, runtimePath);
+  const plan = await prepareAdapter(agentDir, "main", packageDir);
   await installAdapter(agentDir, plan);
-  assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined, runtimePath))).adapterChanged, false);
+  assert.equal((await installAdapter(agentDir, await prepareAdapter(agentDir, "main", undefined))).adapterChanged, false);
   const [file] = plan.files;
   await writeFile(file.path, file.patched + "// foreign change");
-  await assert.rejects(prepareAdapter(agentDir, "main", undefined, runtimePath), /another writer/);
+  await assert.rejects(prepareAdapter(agentDir, "main", undefined), /another writer/);
   await assert.rejects(restoreAdapter(agentDir), /Foreign adapter edit/);
   await writeFile(file.path, file.patched);
   await restoreAdapter(agentDir);
