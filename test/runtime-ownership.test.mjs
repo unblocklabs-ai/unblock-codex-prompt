@@ -126,7 +126,7 @@ test("restore removes Codex: a restored Codex receipt and unsupported Codex sett
   assert.equal("legacyClaudeCoreRestored" in last(), false);
   assert.equal(readPromptPointer(await readFile(join(agentDir, "codex-home", "config.toml"), "utf8")), null, "the restored Codex pointer is left alone");
   // Codex settings are still enforced when Codex is selected.
-  await assert.rejects(run(claudeOnly, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir), /agent-scoped local stdio/);
+  await assert.rejects(run(claudeOnly, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir), /requires a dedicated home/);
   assert.equal(await codexAdapterOwnership(agentDir), "restored");
 });
 
@@ -138,7 +138,7 @@ test("Codex settings are validated by sync, reported by status, and never block 
   // Fresh Claude-only target on a Gateway whose Codex is user-scoped.
   await run(config(userScoped), {}, "status");
   assert.equal(JSON.parse(logs.at(-1)).enrolled, false);
-  await assert.rejects(run(config(userScoped), resolverFor("codex"), "sync", "--codex-plugin-dir", join(root, "codex")), /agent-scoped local stdio/);
+  await assert.rejects(run(config(userScoped), resolverFor("codex"), "sync", "--codex-plugin-dir", join(root, "codex")), /requires a dedicated home/);
   await assert.rejects(readdir(agentDir), /ENOENT/);
   await run(config({ ...userScoped, grant: true }), resolverFor("claude-cli"), "sync");
   assert.deepEqual(await readEnrollment(agentDir), { active: true, previousPointer: null, runtimes: ["claude-cli"] });
@@ -150,13 +150,13 @@ test("Codex settings are validated by sync, reported by status, and never block 
   await run(config(userScoped), {}, "status");
   const status = JSON.parse(logs.at(-1));
   assert.equal(status.ready, false);
-  assert.match(status.codexConfigError, /agent-scoped local stdio/);
+  assert.match(status.codexConfigError, /requires a dedicated home/);
   let service;
   plugin.register({ config: config(userScoped), registerService: value => { service = value; }, registerCli() {}, on() {} });
   const serviceLogs = [];
   await service.start({ config: config(userScoped), logger: { info: value => serviceLogs.push(value), error: value => serviceLogs.push(value) } });
   await service.stop();
-  assert.match(serviceLogs.join("\n"), /Codex management is not effective: Only agent-scoped local stdio/);
+  assert.match(serviceLogs.join("\n"), /Codex management is not effective: User-scoped Codex requires a dedicated home/);
 
   // Restore undoes owned changes without requiring the current settings to be supported...
   const pointerPath = join(agentDir, "codex-home", "config.toml");
@@ -169,6 +169,50 @@ test("Codex settings are validated by sync, reported by status, and never block 
   const patchedPath = join(codexDir, "dist", "thread-requests-reviewed.mjs");
   await writeFile(patchedPath, (await readFile(patchedPath, "utf8")) + "\n// someone else\n");
   await assert.rejects(run(config(userScoped), {}, "restore"), /Foreign adapter edit/);
+});
+
+test("user-scoped Codex sync, refresh and restore are confined to the explicitly dedicated home", async t => {
+  const { root, agentDir, config, run, last } = await setup(t);
+  const codexDir = await fakeCodex(join(root, "codex"));
+  const home = join(root, "dedicated-codex");
+  const shared = join(root, "shared-codex");
+  const previous = 'model_instructions_file = "/previous.md"\nmodel = "fixture"\n';
+  await mkdir(home);
+  await mkdir(shared);
+  await writeFile(join(home, "config.toml"), previous);
+  await writeFile(join(shared, "config.toml"), "# shared\n");
+  const previousEnv = process.env.CODEX_HOME;
+  t.after(() => { if (previousEnv === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousEnv; });
+  process.env.CODEX_HOME = home;
+  const cfg = config({ appServer: { homeScope: "user" } });
+  const sync = () => run(cfg, resolverFor("codex"), "sync", "--codex-plugin-dir", codexDir, "--adopt");
+  const owner = join(home, ".unblock-codex-prompt-owner");
+  await writeFile(owner, `${join(root, "another-agent")}\n`);
+  await assert.rejects(sync(), /requires a dedicated home/);
+  assert.equal(await readFile(join(home, "config.toml"), "utf8"), previous);
+  assert.equal(await readEnrollment(agentDir), null);
+
+  await writeFile(owner, `${agentDir}\n`);
+  await mkdir(join(home, "skills", "pages"), { recursive: true });
+  await writeFile(join(home, "skills", "pages", "SKILL.md"), "---\nname: pages\n---\n");
+  await sync();
+  await run(cfg, {}, "status");
+  const status = last();
+  assert.equal(status.ready, true);
+  assert.equal(status.configPath, join(home, "config.toml"));
+  assert.equal(readPromptPointer(await readFile(status.configPath, "utf8")), status.promptPath);
+  assert.deepEqual(status.codexSkills.disabled, ["pages"]);
+  await run(cfg, {}, "refresh");
+  assert.equal(last().prompt.revision, sha256("FLEET"));
+  await assert.rejects(readFile(join(agentDir, "codex-home", "config.toml"), "utf8"), { code: "ENOENT" });
+
+  process.env.CODEX_HOME = shared;
+  await run(cfg, {}, "status");
+  assert.equal(last().ready, false);
+  await assert.rejects(run(cfg, {}, "refresh"), /requires a dedicated home|Codex home changed/);
+  await run(cfg, {}, "restore");
+  assert.equal((await readFile(status.configPath, "utf8")).trim(), previous.trim());
+  assert.equal(await readFile(join(shared, "config.toml"), "utf8"), "# shared\n");
 });
 
 async function updateCodex(dir, version = "2026.10.9") {

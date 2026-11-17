@@ -1,6 +1,7 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { parseTOML, getStaticTOMLValue } from "toml-eslint-parser";
-import { readOptional, replaceFile, sha256, withLock } from "./manager.js";
+import { readEnrollment, recordedCodexHome, readOptional, replaceFile, sha256, withLock } from "./manager.js";
+import { agentCodexHome } from "./codex-home.js";
 import { readPromptPointer, setPromptPointer } from "./toml.js";
 
 export const CATALOG_REFRESH_MS = 24 * 60 * 60 * 1000;
@@ -8,9 +9,9 @@ const KEY = "model_catalog_json";
 type JsonRecord = Record<string, unknown>;
 type Receipt = { schema: 1; active: boolean; previousPointer: string | null; refreshedAt: number; sha256: string; sourceSha256: string; modelCount: number };
 function record(value: unknown): value is JsonRecord { return value !== null && typeof value === "object" && !Array.isArray(value); }
-function files(agentDir: string) {
-  const home = join(resolve(agentDir), "codex-home");
-  return { home, config: join(home, "config.toml"), catalog: join(home, "unblock-codex-models.json"), receipt: join(home, ".unblock-codex-catalog.json") };
+async function files(agentDir: string) {
+  const home = agentCodexHome(agentDir);
+  return { config: join(await recordedCodexHome(agentDir), "config.toml"), catalog: join(home, "unblock-codex-models.json"), receipt: join(home, ".unblock-codex-catalog.json") };
 }
 
 function parseReceipt(source: string | null): Receipt | null {
@@ -73,7 +74,7 @@ export async function fetchUpstreamCatalog(agentDir: string, configText: string,
   if (!token) throw new Error("Configured catalog provider credential is unavailable in the plugin environment");
   const url = new URL(provider.base_url.replace(/\/$/u, "") + "/models");
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash || url.search) throw new Error("Unsupported catalog provider URL");
-  const cached: unknown = JSON.parse(await readOptional(join(files(agentDir).home, "models_cache.json")) ?? "null");
+  const cached: unknown = JSON.parse(await readOptional(join(await recordedCodexHome(agentDir), "models_cache.json")) ?? "null");
   if (!record(cached) || typeof cached.client_version !== "string" || !/^\d+\.\d+\.\d+$/u.test(cached.client_version)) throw new Error("Managed Codex client version missing from its model cache");
   url.searchParams.set("client_version", cached.client_version);
   let response: Response;
@@ -98,7 +99,7 @@ export async function fetchUpstreamCatalog(agentDir: string, configText: string,
 }
 
 export async function catalogStatus(agentDir: string) {
-  const path = files(agentDir);
+  const path = await files(agentDir);
   const receipt = parseReceipt(await readOptional(path.receipt));
   const text = await readOptional(path.catalog);
   return { enabled: receipt?.active === true, catalogPath: path.catalog, pointerMatches: readPromptPointer(await readOptional(path.config) ?? "", KEY) === path.catalog,
@@ -108,12 +109,12 @@ export async function catalogStatus(agentDir: string) {
 
 export async function refreshCatalog(agentDir: string, options: { automatic?: boolean; now?: number; fetchCatalog?: typeof fetchUpstreamCatalog } = {}) {
   return withLock({ agentDir, prompt: "" }, async () => {
-    const path = files(agentDir);
+    const path = await files(agentDir);
     const config = await readOptional(path.config) ?? "";
     const previousReceipt = await readOptional(path.receipt);
     const receipt = parseReceipt(previousReceipt);
-    const enrollment: unknown = JSON.parse(await readOptional(join(path.home, ".unblock-codex-prompt.json")) ?? "null");
-    if (!record(enrollment) || enrollment.active !== true || (options.automatic && receipt?.active === false)) return { skipped: true, changed: false };
+    const enrollment = await readEnrollment(agentDir);
+    if (!enrollment?.active || !enrollment.runtimes.includes("codex") || (options.automatic && receipt?.active === false)) return { skipped: true, changed: false };
     const pointer = readPromptPointer(config, KEY);
     if (pointer !== null && pointer !== path.catalog) throw new Error("A different model_catalog_json is configured; refusing to replace it");
     const previous = await readOptional(path.catalog);
@@ -135,7 +136,7 @@ export async function refreshCatalog(agentDir: string, options: { automatic?: bo
 
 export async function restoreCatalog(agentDir: string) {
   return withLock({ agentDir, prompt: "" }, async () => {
-    const path = files(agentDir);
+    const path = await files(agentDir);
     const source = await readOptional(path.receipt);
     const receipt = parseReceipt(source);
     if (!receipt) return;

@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { agentCodexHome, assertDedicatedCodexHome } from "./codex-home.js";
 import { readPromptPointer, setPromptPointer } from "./toml.js";
 
 export const RUNTIMES = ["codex", "claude-cli"] as const;
 export type ManagedRuntime = typeof RUNTIMES[number];
 /** previousPointer is Codex's original model_instructions_file; unused by Claude-only enrollment. */
-export type Enrollment = { active: boolean; previousPointer: string | null; runtimes: ManagedRuntime[] };
+export type Enrollment = { active: boolean; previousPointer: string | null; runtimes: ManagedRuntime[]; codexHome?: string };
 /** A fetched fleet policy and its provenance. Metadata (never `text`) is safe to report. */
 export type PolicyReceipt = { url: string; revision: string; checkedAt: number };
 export type ClaudePolicy = PolicyReceipt & { text: string };
@@ -36,13 +37,12 @@ export function parseClaudePolicy(value: unknown): ClaudePolicy {
   }
   return { text: value.text, url: value.url, revision: value.revision, checkedAt: value.checkedAt };
 }
-export type PromptTarget = { agentDir: string; prompt: string; bundle?: FrozenBundle };
+export type PromptTarget = { agentDir: string; prompt: string; bundle?: FrozenBundle; codexHome?: string };
 
-function paths(target: PromptTarget) {
-  const home = join(resolve(target.agentDir), "codex-home");
+function paths(agentDir: string) {
+  const home = agentCodexHome(agentDir);
   return {
     home,
-    config: join(home, "config.toml"),
     prompt: join(home, "unblock-codex-prompt.md"),
     state: join(home, ".unblock-codex-prompt.json"),
     lock: join(home, ".unblock-codex-prompt.lock"),
@@ -76,17 +76,21 @@ export function parseEnrollment(source: string | null): Enrollment | null {
   if (source === null) return null;
   let value: unknown;
   try { value = JSON.parse(source); } catch { throw new Error("Invalid prompt enrollment state"); }
-  if (!value || typeof value !== "object" || !("schema" in value) || (value.schema !== 1 && value.schema !== 2) ||
+  if (!value || typeof value !== "object" || !("schema" in value) || (value.schema !== 1 && value.schema !== 2 && value.schema !== 3) ||
       !("active" in value) || typeof value.active !== "boolean" || !("previousPointer" in value) ||
       (value.previousPointer !== null && typeof value.previousPointer !== "string")) {
     throw new Error("Invalid prompt enrollment state");
   }
   // Schema 1 without runtimes is the pre-0.4 Codex enrollment.
-  if (value.schema === 1 && !("runtimes" in value)) return { active: value.active, previousPointer: value.previousPointer, runtimes: ["codex"] };
+  if (value.schema === 1 && !("runtimes" in value) && !("codexHome" in value)) return { active: value.active, previousPointer: value.previousPointer, runtimes: ["codex"] };
   const runtimes: unknown = "runtimes" in value ? value.runtimes : undefined;
   if (!Array.isArray(runtimes) || !runtimes.length || new Set(runtimes).size !== runtimes.length ||
       runtimes.some(runtime => !RUNTIMES.includes(runtime))) throw new Error("Invalid prompt enrollment state");
-  return { active: value.active, previousPointer: value.previousPointer, runtimes: sortRuntimes(runtimes) };
+  const codexHome = "codexHome" in value ? value.codexHome : undefined;
+  if (value.schema === 3 ? typeof codexHome !== "string" || !isAbsolute(codexHome) || resolve(codexHome) !== codexHome || !runtimes.includes("codex") : codexHome !== undefined) {
+    throw new Error("Invalid prompt enrollment Codex home");
+  }
+  return { active: value.active, previousPointer: value.previousPointer, runtimes: sortRuntimes(runtimes), ...typeof codexHome === "string" ? { codexHome } : {} };
 }
 
 function sortRuntimes(runtimes: readonly ManagedRuntime[]) { return RUNTIMES.filter(runtime => runtimes.includes(runtime)); }
@@ -101,18 +105,23 @@ function sortRuntimes(runtimes: readonly ManagedRuntime[]) { return RUNTIMES.fil
 export function serializeEnrollment(enrollment: Enrollment) {
   const runtimes = sortRuntimes(enrollment.runtimes);
   const codexOnly = runtimes.length === 1 && runtimes[0] === "codex";
-  const value = { schema: enrollment.active && !runtimes.includes("codex") ? 2 : 1, active: enrollment.active,
-    previousPointer: enrollment.previousPointer, ...codexOnly ? {} : { runtimes } };
+  const value = { schema: enrollment.codexHome ? 3 : enrollment.active && !runtimes.includes("codex") ? 2 : 1, active: enrollment.active,
+    previousPointer: enrollment.previousPointer, ...codexOnly && !enrollment.codexHome ? {} : { runtimes }, ...enrollment.codexHome ? { codexHome: enrollment.codexHome } : {} };
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-async function snapshot(target: PromptTarget) {
-  const files = paths(target);
-  await assertDirectoryChain(files.home);
-  const [config, prompt, state] = await Promise.all([
-    readOptional(files.config), readOptional(files.prompt), readOptional(files.state),
-  ]);
+async function snapshot(target: PromptTarget, mode?: "sync" | "skip-config") {
+  const local = paths(target.agentDir);
+  await assertDirectoryChain(local.home);
+  const state = await readOptional(local.state);
   const enrollment = parseEnrollment(state);
+  if (mode === "sync" && enrollment?.active && enrollment.runtimes.includes("codex") && enrollment.codexHome !== target.codexHome) {
+    throw new Error("Codex home changed; restore the previous enrollment before syncing");
+  }
+  const codexHome = mode === "sync" ? target.codexHome : enrollment?.codexHome;
+  if (codexHome && mode !== "skip-config") assertDedicatedCodexHome(codexHome, target.agentDir);
+  const files = { ...local, config: join(codexHome ?? local.home, "config.toml") };
+  const [config, prompt] = await Promise.all([mode === "skip-config" ? null : readOptional(files.config), readOptional(files.prompt)]);
   // Claude-only enrollment never parses or edits Codex configuration.
   const pointer = () => readPromptPointer(config ?? "");
   return { files, config, prompt, state, pointer, enrollment };
@@ -120,14 +129,23 @@ async function snapshot(target: PromptTarget) {
 
 /** Disk-only enrollment for callers that select runtime components. */
 export async function readEnrollment(agentDir: string) {
-  return (await snapshot({ agentDir, prompt: "" })).enrollment;
+  const files = paths(agentDir);
+  await assertDirectoryChain(files.home);
+  return parseEnrollment(await readOptional(files.state));
+}
+
+/** For Codex TOML, skills and provider cache; ownership records stay agent-local. */
+export async function recordedCodexHome(agentDir: string) {
+  const enrollment = await readEnrollment(agentDir);
+  if (enrollment?.codexHome) assertDedicatedCodexHome(enrollment.codexHome, agentDir);
+  return enrollment?.codexHome ?? agentCodexHome(agentDir);
 }
 
 export function sha256(text: string) { return createHash("sha256").update(text).digest("hex"); }
 
 /** Disk state only: this cannot attest to instructions retained by a live Codex thread or Claude process. */
-export async function promptStatus(target: PromptTarget) {
-  const s = await snapshot(target);
+export async function promptStatus(target: PromptTarget, { skipCodexConfig = false } = {}) {
+  const s = await snapshot(target, skipCodexConfig ? "skip-config" : undefined);
   const codex = s.enrollment?.runtimes.includes("codex") ?? true;
   return {
     enrolled: s.enrollment?.active === true,
@@ -135,7 +153,7 @@ export async function promptStatus(target: PromptTarget) {
     runtimes: s.enrollment?.runtimes ?? [],
     configPath: s.files.config,
     promptPath: s.files.prompt,
-    pointerMatches: codex ? s.pointer() === s.files.prompt : null,
+    pointerMatches: codex && !skipCodexConfig ? s.pointer() === s.files.prompt : null,
     actualSha256: s.prompt === null ? null : sha256(s.prompt),
     runtimeVerified: false,
   };
@@ -156,7 +174,7 @@ export async function replaceFile(path: string, previous: string | null, content
 }
 
 export async function withLock<T>(target: PromptTarget, operation: () => Promise<T>) {
-  const files = paths(target);
+  const files = paths(target.agentDir);
   await assertDirectoryChain(files.home);
   await mkdir(files.home, { recursive: true, mode: 0o700 });
   try {
@@ -180,9 +198,9 @@ export async function syncPrompt(target: PromptTarget, options: { adopt?: boolea
   const requested = sortRuntimes(options.runtimes ?? ["codex"]);
   if (!requested.length) throw new Error("Select at least one managed runtime");
   // Reject invalid state before creating even the lock directory.
-  await snapshot(target);
+  await snapshot(target, "sync");
   return withLock(target, async () => {
-    const s = await snapshot(target);
+    const s = await snapshot(target, "sync");
     if (s.enrollment?.active === false && options.automatic) return { changed: false, restored: true };
     const current = s.enrollment?.active ? s.enrollment : null;
     // Sync adds components; removing one requires restore so its owned edits are reverted.
@@ -199,6 +217,7 @@ export async function syncPrompt(target: PromptTarget, options: { adopt?: boolea
     const enrollment: Enrollment = {
       active: true, runtimes,
       previousPointer: addingCodex ? pointer : current?.previousPointer ?? null,
+      ...codex && target.codexHome ? { codexHome: target.codexHome } : {},
     };
     // Save rollback information first; point Codex at the file only after it exists.
     const stateChanged = await replaceFile(s.files.state, s.state, serializeEnrollment(enrollment));

@@ -15,6 +15,7 @@ import { isAbsolute, join } from "node:path";
 import { CATALOG_REFRESH_MS, catalogStatus, refreshCatalog, restoreCatalog, startCatalogRefresh } from "./catalog.js";
 import { codexSkillsStatus, refreshCodexSkills, removeCodexSkills } from "./skills.js";
 import { refreshFailure } from "./refresh-error.js";
+import { assertDedicatedCodexHome, configuredCodexHome } from "./codex-home.js";
 
 type Target = Awaited<ReturnType<typeof resolveTarget>>;
 const codexEnrolled = (enrollment: Enrollment | null) => enrollment?.runtimes.includes("codex") === true;
@@ -28,7 +29,9 @@ function claudePolicyReceipt(bundle: unknown) {
 
 async function refresh(target: Target, automatic = false) {
   const failures: unknown[] = [];
-  const codex = codexEnrolled(await readEnrollment(target.agentDir));
+  const enrollment = await readEnrollment(target.agentDir);
+  const codex = enrollment?.active && codexEnrolled(enrollment);
+  if (codex) resolveCodexHome(target, enrollment);
   let catalog;
   let prompt;
   let skills;
@@ -44,23 +47,17 @@ async function refresh(target: Target, automatic = false) {
   return { catalog, prompt, skills };
 }
 
-/** Why the configured Codex app-server cannot read this agent's managed files, if it cannot. */
-function codexAppServerProblem(config: OpenClawConfig) {
-  const appServer = config.plugins?.entries?.codex?.config?.appServer;
-  if (appServer === undefined) return undefined;
-  if (!appServer || typeof appServer !== "object" || Array.isArray(appServer)) return "Invalid Codex appServer config";
-  if (("transport" in appServer && appServer.transport !== "stdio") ||
-      ("homeScope" in appServer && appServer.homeScope !== "agent")) {
-    return "Only agent-scoped local stdio Codex is supported";
+/** Validate the actual stdio home; an active enrollment cannot silently change homes. */
+function resolveCodexHome(target: Target, enrollment: Enrollment | null) {
+  const codexHome = configuredCodexHome(target.config);
+  if (codexHome) {
+    if (listAgentIds(target.config).length !== 1) throw new Error("User-scoped Codex requires a Gateway configured for only the managed agent");
+    assertDedicatedCodexHome(codexHome, target.agentDir);
   }
-  // OpenClaw owns launching Codex, including operator-selected binaries/args.
-  // We own this agent's prompt files, not its executable selection.
-  return undefined;
-}
-
-function assertCodexAppServer(config: OpenClawConfig) {
-  const problem = codexAppServerProblem(config);
-  if (problem) throw new Error(problem);
+  if (enrollment?.active && codexEnrolled(enrollment) && enrollment.codexHome !== codexHome) {
+    throw new Error("Codex home changed; restore the previous enrollment before syncing");
+  }
+  return codexHome;
 }
 
 async function resolveTarget(config: OpenClawConfig) {
@@ -69,7 +66,7 @@ async function resolveTarget(config: OpenClawConfig) {
   const agentDir = resolveAgentDir(config, settings.agentId);
   // Codex app-server settings are validated by sync once it selects Codex, and reported by
   // status; restore and Claude-only management never depend on them.
-  return { agentDir, settings, workspaceDir: resolveAgentWorkspaceDir(config, settings.agentId) };
+  return { agentDir, settings, config, workspaceDir: resolveAgentWorkspaceDir(config, settings.agentId) };
 }
 
 /**
@@ -94,13 +91,15 @@ function errorMessage(error: unknown) { return error instanceof Error ? error.me
 
 async function status(config: OpenClawConfig) {
   const target = await resolveTarget(config);
-  const disk = await promptStatus({ ...target, prompt: "" });
-  const runtimes = disk.runtimes as ManagedRuntime[];
+  const enrollment = await readEnrollment(target.agentDir);
+  const runtimes = enrollment?.runtimes ?? [];
   const adapter = await adapterStatus(target.agentDir);
   let error: string | undefined;
   let codexReady = false;
-  const codexConfigError = runtimes.includes("codex") ? codexAppServerProblem(config) : undefined;
-  if (runtimes.includes("codex") && !codexConfigError) try { codexReady = disk.enrolled && readFrozenPolicy(target.agentDir) !== null && adapter.installed; } catch (cause) { error = errorMessage(cause); }
+  let codexConfigError: string | undefined;
+  if (runtimes.includes("codex")) try { resolveCodexHome(target, enrollment); } catch (cause) { codexConfigError = errorMessage(cause); }
+  const disk = await promptStatus({ ...target, prompt: "" }, { skipCodexConfig: !!codexConfigError });
+  if (runtimes.includes("codex") && !codexConfigError) try { codexReady = disk.enrolled && readFrozenPolicy(target.agentDir, config) !== null && adapter.installed; } catch (cause) { error = errorMessage(cause); }
   // A 0.4 install patched OpenClaw core for Claude; any receipt it left is reported. An unreadable
   // receipt is reported too, and counts as a possible leftover until sync or restore resolves it.
   const legacyClaudeCore = await claudeAdapterStatus(target.agentDir)
@@ -137,14 +136,14 @@ export default definePluginEntry({
         const result = await status(ctx.config);
         ctx.logger.info(`${PLUGIN_ID}: ${JSON.stringify(result)}`);
         const target = await resolveTarget(ctx.config);
-        const codex = result.runtimes.includes("codex");
+        const codex = result.runtimes.includes("codex") && !result.codexConfigError;
         if (result.enrolled && codex) {
           // Remote Codex plugins can add skills at any time; reconcile before app-servers start.
           try { ctx.logger.info(`${PLUGIN_ID}: codex skills ${JSON.stringify(await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills))}`); }
           catch (error) { ctx.logger.error(`${PLUGIN_ID}: codex skills not applied: ${error instanceof Error ? error.message : String(error)}`); }
         }
         if (result.enrolled && result.codexConfigError) {
-          ctx.logger.error(`${PLUGIN_ID}: Codex management is not effective: ${result.codexConfigError}; restore, or return Codex to agent-scoped local stdio and re-sync`);
+          ctx.logger.error(`${PLUGIN_ID}: Codex management is not effective: ${result.codexConfigError}`);
         }
         if (result.legacyClaudeCore?.state === "invalid") {
           ctx.logger.error(`${PLUGIN_ID}: the 0.4 Claude CLI core receipt is unreadable (${"error" in result.legacyClaudeCore ? result.legacyClaudeCore.error : "invalid"}); inspect it, then run openclaw codex-prompt sync or restore`);
@@ -158,7 +157,7 @@ export default definePluginEntry({
             ctx.logger.error(`${PLUGIN_ID}: Claude CLI managed state is invalid (${result.claude.error}); the target agent's Claude runs use OpenClaw's prompt until openclaw codex-prompt sync`);
           }
         }
-        if (result.enrolled) {
+        if (result.enrolled && !result.codexConfigError) {
           const catalog = codex ? await catalogStatus(target.agentDir) : undefined;
           // The oldest check among the enrolled runtimes' policies decides when the next refresh is due.
           const remote = result.remotePrompt;
@@ -218,15 +217,18 @@ export default definePluginEntry({
       root.command("status").description("Inspect disk state without writing or claiming live adoption")
         .action(async () => {
           const target = await resolveTarget(config);
-          const codex = codexEnrolled(await readEnrollment(target.agentDir));
-          console.log(JSON.stringify({ ...await status(config), ...codex ? { catalog: await catalogStatus(target.agentDir),
+          const result = await status(config);
+          const codex = result.runtimes.includes("codex") && !result.codexConfigError;
+          console.log(JSON.stringify({ ...result, ...codex ? { catalog: await catalogStatus(target.agentDir),
             codexSkills: await codexSkillsStatus(target.agentDir, target.settings.disabledCodexSkills) } : {} }, null, 2));
         });
       root.command("refresh-catalog").description("Fetch fresh provider metadata and repair the managed instruction catalog")
         .action(async () => {
           const target = await resolveTarget(config);
           if (!target.settings.suppressExplicitDelegationPrompt) throw new Error("Enable suppressExplicitDelegationPrompt before refreshing the catalog");
-          if (!codexEnrolled(await readEnrollment(target.agentDir))) throw new Error("The model catalog applies only to Codex enrollment");
+          const enrollment = await readEnrollment(target.agentDir);
+          if (!enrollment?.active || !codexEnrolled(enrollment)) throw new Error("The model catalog applies only to active Codex enrollment");
+          resolveCodexHome(target, enrollment);
           console.log(JSON.stringify(await refreshCatalog(target.agentDir), null, 2));
         });
       root.command("refresh").description("Refresh remote prompt, enabled catalog and codex skills without rereading frozen agent context")
@@ -255,8 +257,9 @@ export default definePluginEntry({
         if (hookProblem) throw new Error(`Claude CLI management needs its prompt hook: ${hookProblem}`);
         // Validate every adapter before writing any prompt state.
         let codexPlan;
+        let codexHome: string | undefined;
         if (codex) {
-          assertCodexAppServer(config);
+          codexHome = resolveCodexHome(target, enrollment);
           codexPlan = await prepareAdapter(target.agentDir, target.settings.agentId, options.codexPluginDir);
         }
         // A 0.4 install patched OpenClaw core for Claude. Its restore is validated (files and
@@ -269,7 +272,7 @@ export default definePluginEntry({
         // Codex artifact. Skills are not compiled: both runtimes get the session catalog live.
         const { compiled, remote, claudePolicy } = await fetchAndCompile({ codex, claude, promptUrl: target.settings.promptUrl, workspaceDir: target.workspaceDir });
         const runtimes: ManagedRuntime[] = [...codex ? ["codex" as const] : [], ...claude ? ["claude-cli" as const] : []];
-        const result = await syncPrompt({ ...target, ...compiled }, { adopt: options.adopt === true, runtimes });
+        const result = await syncPrompt({ ...target, ...compiled, ...codexHome ? { codexHome } : {} }, { adopt: options.adopt === true, runtimes });
         const adapter = codexPlan ? await installAdapter(target.agentDir, codexPlan) : undefined;
         const legacyClaudeCoreRestored = legacyClaude.files.length ? await applyClaudeRestore(legacyClaude) : undefined;
         const catalog = codex && target.settings.suppressExplicitDelegationPrompt ? await refreshCatalog(target.agentDir) : undefined;

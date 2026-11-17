@@ -9,7 +9,7 @@ import { managedTargetSource } from "./managed-target.js";
 import { codexBridgeSource } from "./codex-bridge-source.js";
 
 const MARKER = "// unblock-codex-prompt bridge v1";
-const BUNDLE_NAME = /^(?:thread-(?:lifecycle|requests|policy)|dynamic-tools|attempt-workspace-context|run-attempt)-[\w-]+\.m?js$/u;
+const BUNDLE_NAME = /^(?:thread-(?:lifecycle|requests|policy)|dynamic-tools|attempt-workspace-context|run-attempt|native-skill-isolation)-[\w-]+\.m?js$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 // Reviewed context producers/carriers, identical in every published @openclaw/codex 2026.10.5-2026.10.9.
 const REFRESHABLE_CONTEXT_HASHES = {
@@ -21,6 +21,16 @@ const REFRESHABLE_CONTEXT_HASHES = {
   buildCodexThreadConfiguration: "e6994e63d7f408b82ea55a9e9c3e1a87967e13c168d6d72a50a4c16466cca093",
   refreshCodexThreadInstructions: "23068afa77e3286acc06885b7440d6a1b44ede4c93a6e322fbbbcd6df8fb8777",
   restoreCodexThreadInstructionsAfterCompaction: "86d6f792175cfbc604f5408016e00b77ed1f7fbefa33b0210d6fbf8d56a2c0a4",
+};
+// 2026.11.5 moves workspace context, separates personal and shared persona, and
+// makes turn/start assembly async. The rest of the reviewed carriers are unchanged.
+const SPLIT_PERSONA_CONTEXT_HASHES = {
+  ...REFRESHABLE_CONTEXT_HASHES,
+  buildDeveloperInstructions: "b394fae4fc72f0414bc7975c95d76a081dc24542fc7220d6c7aab631f008a38f",
+  buildCodexWorkspaceBootstrapContext: "4682a0a9242a1564870517eb27d5475ed83834574878575e830c93f8b16bcd99",
+  prepareCodexAttemptContext: "73822733885dff785b915694e0482b4d35b79af303592b6ada721dee22f6d5f6",
+  buildCodexThreadConfiguration: "f485f775aef22bbc670f2beeb6a6742a9f371736f464cd03fd070812c95aecc2",
+  splitCodexExtraSystemPrompt: "3c7c1f37252269c00218f7cbd4c21425a9d81014429dbd6b00f9252b6ea097a0",
 };
 type AdapterFunction = { node: FunctionDeclaration; bundle: number };
 /** packageVersion (recorded since 0.4) lets restore tell an updater's replacement from a foreign edit. */
@@ -123,11 +133,11 @@ function unblockRelay(params, part, text) {
 }
 function unblockBaseInstructions(params) {
   if (!unblockManagedTarget(params)) return null;
-  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)});
+  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)}, params.config);
 }
 ${managedTargetSource({ name: "unblockManagedTarget", agentId, targetChanged: "Frozen bridge target changed; restore and reinstall the adapter" })}function unblockFrozenPolicy(params) {
   if (!unblockManagedTarget(params)) return null;
-  return unblockLoadBridge().readFrozenPolicy(${JSON.stringify(agentDir)});
+  return unblockLoadBridge().readFrozenPolicy(${JSON.stringify(agentDir)}, params.config);
 }
 `;
 }
@@ -143,16 +153,17 @@ export function patchAdapterSources(sources: string[], agentDir: string, agentId
     return matches[0]!;
   };
   // Older layouts carry persona in turn-scoped collaboration text that native children never see.
-  if (functions.some(fn => fn.node.id?.name === "buildTurnScopedCollaborationInstructions") ||
-      !functions.some(fn => fn.node.id?.name === "buildCodexWorkspaceBootstrapContext")) {
+  if (functions.some(fn => fn.node.id?.name === "buildTurnScopedCollaborationInstructions")) {
     throw new Error(`Unsupported Codex context layout; live agent context requires @openclaw/codex >=${MINIMUM_OPENCLAW}`);
   }
+  const workspace = find("buildCodexWorkspaceBootstrapContext");
+  const splitPersona = sha256(sources[workspace.bundle]!.slice(workspace.node.start, workspace.node.end)) === SPLIT_PERSONA_CONTEXT_HASHES.buildCodexWorkspaceBootstrapContext;
   const prefix = bridgePrefix(agentDir, agentId);
-  return patchOperationalAdapter(patchRefreshableAdapter(sources, find, prefix), prefix);
+  return patchOperationalAdapter(patchRefreshableAdapter(sources, find, prefix, splitPersona), prefix, splitPersona);
 }
 
-function patchRefreshableAdapter(sources: string[], find: (name: string) => AdapterFunction, prefix: string) {
-  for (const [name, expected] of Object.entries(REFRESHABLE_CONTEXT_HASHES)) {
+function patchRefreshableAdapter(sources: string[], find: (name: string) => AdapterFunction, prefix: string, splitPersona: boolean) {
+  for (const [name, expected] of Object.entries(splitPersona ? SPLIT_PERSONA_CONTEXT_HASHES : REFRESHABLE_CONTEXT_HASHES)) {
     const { node, bundle } = find(name);
     if (sha256(sources[bundle]!.slice(node.start, node.end)) !== expected) {
       throw new Error("Unsupported Codex context assembly: " + name + "; review the changed upstream function before syncing");
@@ -185,7 +196,8 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
   // every supported release) and relay their output on it:
   // - skills: OpenClaw's per-session skills catalog with its skills_search/skills_read hints,
   //   exactly as upstream renders it (nothing when upstream renders nothing);
-  // - persona: SOUL, IDENTITY, shared USER and the session-selected personal USER.
+  // - persona: SOUL, IDENTITY and shared USER; on split-persona hosts the personal USER
+  //   stays on the original parent-only inference route and is never persisted by the bridge.
   // Memory stays suppressed at its producer; native AGENTS stays live.
   const skillsWrapper = `function renderCodexSkillsInstructions(params) {
   const policy = unblockFrozenPolicy(params.attempt);
@@ -199,13 +211,16 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
   const policy = unblockFrozenPolicy(params.params);
   const context = await unblockOriginalWorkspaceContext(params);
   if (policy === null) return context;
-  unblockRelay(params.params, "persona", context.personaInstructions);
-  return { ...context, personaInstructions: undefined, sharedPersonaInstructions: undefined, memoryInstructions: undefined };
+  unblockRelay(params.params, "persona", context.${splitPersona ? "sharedPersonaInstructions" : "personaInstructions"});
+  ${splitPersona ? `const personal = context.personaFiles?.filter(file => file.personalUser === true) ?? [];
+  const personaInstructions = personal.length ? ["## Personal USER.md (current request only)", ...personal.map(file => "### " + file.path + "\\n\\n" + file.content)].join("\\n\\n") : undefined;` : "const personaInstructions = undefined;"}
+  return { ...context, personaInstructions, sharedPersonaInstructions: undefined, memoryInstructions: undefined };
 }
 `;
+  const additions = splitPersona ? "options.omitConversationTurnContext ? splitCodexExtraSystemPrompt(params).persistent : params.extraSystemPrompt" : "params.extraSystemPrompt";
   const edits = [
     { bundle: developer.bundle, start: developer.node.body.start + 1, end: developer.node.body.start + 1,
-      text: '\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params[unblockLiveKey]?.skills, params[unblockLiveKey]?.persona, params.gitCoauthorPrompt, unblockNormalizeAdditions(params.extraSystemPrompt)].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");' },
+      text: `\n\tconst unblockPolicy = unblockFrozenPolicy(params);\n\tif (unblockPolicy !== null) return [unblockPolicy, params[unblockLiveKey]?.skills, params[unblockLiveKey]?.persona, params.gitCoauthorPrompt, unblockNormalizeAdditions(${additions})].filter(section => typeof section === "string" && section.trim()).join("\\n\\n");` },
     { bundle: skills.bundle, start: skills.node.start, end: skills.node.end, text: skillsWrapper + originalSkills },
     { bundle: workspace.bundle, start: workspace.node.start, end: workspace.node.end, text: wrapper + originalWorkspace },
     { bundle: thread.bundle, start: thread.node.start, end: thread.node.end, text: threadWrapper + originalThread },
@@ -224,23 +239,30 @@ const OPERATIONAL_HASHES = {
   refreshCodexThreadPolicy: "69d6e9903896c77e71542957dbadddaca5d3cbb4d7cd56b8ff0de2a5ca42b995",
 };
 
-function patchOperationalAdapter(sources: string[], prefix: string) {
+function patchOperationalAdapter(sources: string[], prefix: string, splitPersona: boolean) {
   const functionsByBundle = sources.map(source => parse(source, { ecmaVersion: "latest", sourceType: "module" }).body
     .filter(node => node.type === "FunctionDeclaration"));
   const names = functionsByBundle.flat().map(node => node.id?.name);
-  const required = Object.keys(OPERATIONAL_HASHES);
-  if (required.some(name => names.includes(name)) && required.some(name => names.filter(found => found === name).length !== 1)) {
+  const hashes = splitPersona ? { ...OPERATIONAL_HASHES,
+    buildTurnStartParams: "734558ecc9adf1193ea338a848d032140a36a5a64cc4f8461a988b7c02771e1a",
+    resumeExistingCodexThread: "659dddc25b0aa3e1f3929d663879b421f6803c1bb66e9ba2f91f9d0a2dd85a61",
+  } : OPERATIONAL_HASHES;
+  const required = Object.keys(hashes);
+  if ((splitPersona || required.some(name => names.includes(name))) && required.some(name => names.filter(found => found === name).length !== 1)) {
     throw new Error("Unsupported Codex operational context: missing or duplicate carrier; review before syncing");
   }
   return sources.map((source, bundle) => {
     const functions = functionsByBundle[bundle]!;
     const edits = [];
-    for (const [name, hash] of Object.entries(OPERATIONAL_HASHES)) {
+    for (const [name, hash] of Object.entries(hashes)) {
       const matches = functions.filter(node => node.id?.name === name);
       if (!matches.length) continue; // Older carriers have no per-turn additional context.
       const node = matches[0]!;
       const original = source.slice(node.start, node.end);
       if (matches.length !== 1 || sha256(original) !== hash) throw new Error("Unsupported Codex operational context: " + name + "; review before syncing");
+      // The newer host's handoff already distinguishes generic policy from independent and
+      // parent-local instructions, and retains its own configuration/ownership checks.
+      if (splitPersona && (name === "resumeExistingCodexThread" || name === "refreshCodexThreadPolicy")) continue;
       let replacement: string;
       if (name === "resumeExistingCodexThread") {
         replacement = original.replace("await refreshCodexThreadPolicy({", "await refreshCodexThreadPolicy({\n\t\t\tunblockManaged: unblockFrozenPolicy(params.params) !== null,");
@@ -250,7 +272,7 @@ function patchOperationalAdapter(sources: string[], prefix: string) {
         const originalName = "unblockOriginal" + name;
         const value = name === "buildTurnStartParams" ? "result.additionalContext" : "result";
         const normalized = name === "buildTurnStartParams" ? "{ ...result, additionalContext: unblockNormalizeTurnContext(result.additionalContext) }" : "unblockNormalizeTurnContext(result)";
-        replacement = `function ${name}(params, options) {\n  const managed = unblockFrozenPolicy(params) !== null;\n  const result = ${originalName}(params, options);\n  return managed && ${value} ? ${normalized} : result;\n}\n` + original.replace(`function ${name}(`, `function ${originalName}(`);
+        replacement = `${node.async ? "async " : ""}function ${name}(params, options) {\n  const managed = unblockFrozenPolicy(params) !== null;\n  const result = ${node.async ? "await " : ""}${originalName}(params, options);\n  return managed && ${value} ? ${normalized} : result;\n}\n` + original.replace(`function ${name}(`, `function ${originalName}(`);
       }
       edits.push({ start: node.start, end: node.end, text: replacement });
     }

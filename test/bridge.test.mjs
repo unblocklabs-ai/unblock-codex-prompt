@@ -57,7 +57,7 @@ test("Codex layouts older than the reviewed live-context carriers are refused", 
   // 2026.9.2-2026.9.9 deliver persona in turn-scoped collaboration text native children never see.
   for (const sources of [[adapterFixture(legacy)], [adapterFixture(modern)], splitAdapterFixture(),
     [...splitAdapterFixture(), "async function buildCodexWorkspaceBootstrapContext(params) { return {}; }"]]) {
-    assert.throws(() => patchAdapterSources(sources, "/agent", "main"), /requires @openclaw\/codex >=2026\.10\.5/);
+    assert.throws(() => patchAdapterSources(sources, "/agent", "main"), /Unsupported Codex (?:adapter shape|context layout)/);
   }
 });
 

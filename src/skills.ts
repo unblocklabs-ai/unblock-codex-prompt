@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getStaticTOMLValue, parseTOML } from "toml-eslint-parser";
-import { readOptional, replaceFile, withLock } from "./manager.js";
+import { readEnrollment, recordedCodexHome, readOptional, replaceFile, withLock } from "./manager.js";
 
 // Codex loads every discovered skill unless a [[skills.config]] rule turns it off, and remote
 // plugins can add skills at any time. This block disables the listed skills and plugins by name,
@@ -10,11 +10,6 @@ const BEGIN = "# BEGIN unblock-codex-prompt codex skills (managed; replaced on r
 const END = "# END unblock-codex-prompt codex skills";
 
 export type CodexSkill = { name: string; plugin: string | null };
-
-function files(agentDir: string) {
-  const home = join(resolve(agentDir), "codex-home");
-  return { home, config: join(home, "config.toml"), state: join(home, ".unblock-codex-prompt.json") };
-}
 
 function isMissing(error: unknown) {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
@@ -49,7 +44,7 @@ async function skillsUnder(root: string, depth: number): Promise<string[]> {
 
 /** Skills Codex loads from this agent's home: system, user and cached plugin skills (`plugin:skill`). */
 export async function discoverCodexSkills(agentDir: string): Promise<CodexSkill[]> {
-  const { home } = files(agentDir);
+  const home = await recordedCodexHome(agentDir);
   const found: CodexSkill[] = [];
   for (const name of await skillsUnder(join(home, "skills", ".system"), 1)) found.push({ name, plugin: null });
   for (const name of await skillsUnder(join(home, "skills"), 1)) found.push({ name, plugin: null });
@@ -127,18 +122,12 @@ export function setSkillsBlock(source: string, block: string | null) {
   return result;
 }
 
-async function enrolled(agentDir: string) {
-  const source = await readOptional(files(agentDir).state);
-  if (source === null) return false;
-  const state: unknown = JSON.parse(source);
-  return !!state && typeof state === "object" && "active" in state && state.active === true;
-}
-
 /** Disable the listed skills in this agent's Codex home. New plugin skills are caught on the next refresh. */
 export async function refreshCodexSkills(agentDir: string, disable: readonly string[]) {
   return withLock({ agentDir, prompt: "" }, async () => {
-    if (!await enrolled(agentDir)) return { skipped: true, changed: false };
-    const path = files(agentDir).config;
+    const enrollment = await readEnrollment(agentDir);
+    if (!enrollment?.active || !enrollment.runtimes.includes("codex")) return { skipped: true, changed: false };
+    const path = join(await recordedCodexHome(agentDir), "config.toml");
     const current = await readOptional(path) ?? "";
     const skills = await discoverCodexSkills(agentDir);
     const changed = await replaceFile(path, current, setSkillsBlock(current, renderSkillsBlock(skills, disable)));
@@ -154,7 +143,7 @@ export async function refreshCodexSkills(agentDir: string, disable: readonly str
 
 export async function removeCodexSkills(agentDir: string) {
   return withLock({ agentDir, prompt: "" }, async () => {
-    const path = files(agentDir).config;
+    const path = join(await recordedCodexHome(agentDir), "config.toml");
     const current = await readOptional(path);
     if (current === null) return { changed: false };
     return { changed: await replaceFile(path, current, setSkillsBlock(current, null)) };
@@ -162,7 +151,7 @@ export async function removeCodexSkills(agentDir: string) {
 }
 
 export async function codexSkillsStatus(agentDir: string, disable: readonly string[]) {
-  const source = await readOptional(files(agentDir).config) ?? "";
+  const source = await readOptional(join(await recordedCodexHome(agentDir), "config.toml")) ?? "";
   const found = locateBlock(source);
   const managed = found ? source.slice(found.begin, found.end) : "";
   const disabled = [...managed.matchAll(/^name = (".*")\nenabled = false$/gmu)].map(match => JSON.parse(match[1]!) as string);

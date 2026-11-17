@@ -1,5 +1,19 @@
 # Validation
 
+## OpenClaw/Codex 2026.11.5 and dedicated user homes — 2026-11-17
+
+- Published Codex bundles: 2026.10.9 still prepares six patches; 2026.11.5 prepares
+  four. On an isolated 2026.11.5 Gateway with the official Codex plugin and app-server
+  0.164.0, CLI sync used `env.vars.CODEX_HOME` with `homeScope: "user"`.
+- Loopback inference captured one copy of the fleet policy and shared persona. After
+  CLI refresh, the next turn received only the new policy and retained the OpenClaw
+  conversation. The restricted native thread rotated on change and was reused without
+  a change. Native child creation and compaction were not exercised in this capture.
+- The CLI regression checks refusal of a foreign ownership marker, dedicated-home
+  sync and skills management, refresh, and restore to the recorded home after
+  `CODEX_HOME` changes. Repository preflight: 86 tests, both plugin inspections,
+  and package validation passed.
+
 ## Self-contained Codex adapter — 2026-11-10
 
 - The request-assembly regression reproduced `MODULE_NOT_FOUND` with the old adapter

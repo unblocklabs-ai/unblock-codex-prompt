@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readPromptPointer } from "./toml.js";
 import { parseClaudePolicy, parseEnrollment } from "./manager.js";
+import { assertDedicatedCodexHome, configuredCodexHome } from "./codex-home.js";
 export { normalizeOpenClawAdditions, normalizeOpenClawTurnContext } from "./context.js";
 
 function readPrivate(path: string) {
@@ -38,14 +39,18 @@ function readVerifiedSnapshot(home: string) {
   return { bundle, policy: bundle.policy, prompt };
 }
 
-function readCodexSnapshot(agentDir: string) {
+function readCodexSnapshot(agentDir: string, config?: unknown) {
   const home = join(agentDir, "codex-home");
   const state = readEnrollment(home);
   if (!state) throw new Error("Invalid frozen bridge enrollment");
   if (!state.active) return null;
   if (!state.runtimes.includes("codex")) throw new Error("Codex bridge installed without Codex enrollment; restore or run codex-prompt sync");
+  if (config !== undefined && configuredCodexHome(config) !== state.codexHome) {
+    throw new Error("Codex app-server home changed; restore and re-sync the prompt bridge");
+  }
+  if (state.codexHome) assertDedicatedCodexHome(state.codexHome, agentDir);
   const snapshot = readVerifiedSnapshot(home);
-  if (readPromptPointer(readPrivate(join(home, "config.toml"))) !== join(home, "unblock-codex-prompt.md")) {
+  if (readPromptPointer(readPrivate(join(state.codexHome ?? home, "config.toml"))) !== join(home, "unblock-codex-prompt.md")) {
     throw new Error("Frozen prompt pointer changed; refusing context suppression");
   }
   return snapshot;
@@ -56,8 +61,8 @@ function readCodexSnapshot(agentDir: string) {
  * means this Codex run is managed. The value is the bundle's `policy`, which current syncs leave
  * "": the Codex policy is the prompt-file prefix, delivered as base instructions.
  */
-export function readFrozenPolicy(agentDir: string): string | null {
-  return readCodexSnapshot(agentDir)?.policy ?? null;
+export function readFrozenPolicy(agentDir: string, config?: unknown): string | null {
+  return readCodexSnapshot(agentDir, config)?.policy ?? null;
 }
 
 /**
@@ -65,8 +70,8 @@ export function readFrozenPolicy(agentDir: string): string | null {
  * Codex reads base instructions per session rather than from history, so a refreshed file
  * reaches an existing thread when OpenClaw resumes it; the file itself stays the fallback.
  */
-export function readCodexBaseInstructions(agentDir: string): string | null {
-  return readCodexSnapshot(agentDir)?.prompt ?? null;
+export function readCodexBaseInstructions(agentDir: string, config?: unknown): string | null {
+  return readCodexSnapshot(agentDir, config)?.prompt ?? null;
 }
 
 export type ClaudeManagedContext = { policy: string; agentContext: string };

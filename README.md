@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.5.2.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.5.3.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -61,6 +61,7 @@ files use private permissions.
 
 - Codex: **OpenClaw and @openclaw/codex >=2026.10.5**. Every published release from
   2026.10.5 through 2026.10.9 has the identical reviewed context-assembly functions.
+  **2026.11.5** has a separately reviewed layout.
   Older layouts (2026.9.x and 2026.10.1–2026.10.4) are refused: 2026.9.x carries
   persona in turn-scoped text native children never see. Nodes on those versions
   stay on plugin 0.3.x until upgraded; restore still works for them. Once the Codex
@@ -68,8 +69,9 @@ files use private permissions.
   without a restore. Bundle names
   may change; fingerprints of the context-assembly functions must still match.
   Changed assembly is refused pending review, rather than patched blindly.
-- Local stdio Codex with an OpenClaw agent-scoped home. Operator-selected
-  `appServer.command` and `appServer.args` are supported and left unchanged.
+- Local stdio Codex with an OpenClaw agent-scoped home or an explicitly dedicated
+  user-scoped home. Operator-selected `appServer.command` and `appServer.args`
+  are supported and left unchanged.
   The launcher must honor OpenClaw's `CODEX_HOME` and must not override the
   managed `model_instructions_file`; status cannot attest to launcher behavior.
 - One target agent per installation. Other agents use upstream behavior. Native
@@ -87,7 +89,10 @@ producer and moves two host-rendered contributions out of the parent-only and
 refreshable carriers into the thread developer instructions, after the fleet policy:
 the session's OpenClaw skills catalog (with OpenClaw's `skills_search`/`skills_read`
 hints, exactly as upstream renders it, and nothing when upstream renders nothing), then
-the persona (SOUL, IDENTITY, shared USER and the selected personal USER). Those are
+the shared persona (SOUL, IDENTITY, shared USER). On 2026.11.5, the personal
+`USER.md` remains in OpenClaw's parent-only inference request; connections without
+that path do not receive it. Older reviewed layouts carry personal USER with
+shared persona. The thread instructions are
 rebuilt every turn: a catalog change or persona edit changes them, and Codex re-syncs
 the existing thread on its next turn with a policy handoff. They survive compaction
 and are inherited by native children. Native AGENTS and operational context remain
@@ -249,9 +254,22 @@ Codex sync after that starts fresh, may target a different Codex package, and re
 the old receipt's backups. Otherwise sync and restore keep refusing foreign edits and
 foreign backups.
 
-Codex `appServer` settings (agent-scoped local stdio only) are checked by sync when
+Codex `appServer` settings (local stdio only) are checked by sync when
 it selects Codex and reported by status as `codexConfigError` for a Codex
 enrollment. They never block Claude-only enrollment, status or restore.
+
+With `appServer.homeScope: "user"`, use a Gateway configured for one agent and
+reserve the effective `CODEX_HOME` for that agent alone. OpenClaw uses the Gateway
+environment (including `env.vars.CODEX_HOME`), or `~/.codex` when unset. In that
+directory, create a regular `.unblock-codex-prompt-owner` file containing the
+agent's absolute OpenClaw `agentDir`, one line. The home and marker must be owned
+by the Gateway user and not group- or world-writable. Do not mark a home used by
+other agents, Codex CLI, or Desktop. The launcher must honor the same `CODEX_HOME`.
+
+Sync manages `config.toml` in the dedicated home; the prompt, receipts, and
+backups stay in `<agentDir>/codex-home`. To switch homes, restore first. Restore
+uses the recorded home, even if the current Gateway environment points elsewhere;
+keep the ownership marker until restore finishes.
 
 Claude CLI enrollment needs the hook to be registrable. OpenClaw registers
 `before_prompt_build` for a non-bundled plugin only with
@@ -343,7 +361,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.2.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.3.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -480,7 +498,8 @@ reports each runtime's policy revision and last successful `checkedAt` timestamp
 policy text is never printed. A changed
 revision reaches existing conversations on their next turn: Codex resumes the thread
 with the new base instructions (`nextCodexTurn`), and Claude starts the next CLI
-process with the new prompt, resuming the conversation (`nextClaudeProcess`). Earlier
+process with the new prompt (`nextClaudeProcess`). OpenClaw may replace a restricted
+native Codex thread while carrying forward the OpenClaw conversation. Earlier
 history is not rewritten. A live Codex incognito conversation cannot be resumed; it
 keeps the revision it started with.
 The plugin never restarts the Gateway automatically.
@@ -628,7 +647,7 @@ sync.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.5.2
+npm run release:check -- v0.5.3
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -638,7 +657,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.2 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.3 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 
