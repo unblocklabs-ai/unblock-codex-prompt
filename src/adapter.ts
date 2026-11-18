@@ -133,7 +133,7 @@ function unblockRelay(params, part, text) {
 }
 function unblockBaseInstructions(params) {
   if (!unblockManagedTarget(params)) return null;
-  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)}, params.config);
+  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)}, params.config, params.bootstrapContextMode);
 }
 ${managedTargetSource({ name: "unblockManagedTarget", agentId, targetChanged: "Frozen bridge target changed; restore and reinstall the adapter" })}function unblockFrozenPolicy(params) {
   if (!unblockManagedTarget(params)) return null;
@@ -175,7 +175,7 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
   const thread = find("buildCodexThreadConfiguration");
   const originalThread = sources[thread.bundle]!.slice(thread.node.start, thread.node.end)
     .replace("function buildCodexThreadConfiguration(", "function unblockOriginalThreadConfiguration(");
-  // Thread start, resume and fork requests carry the verified base file as base instructions.
+  // Thread start, resume and fork carry the verified base (policy only for lightweight runs).
   // OpenClaw fingerprints these requests, so a refreshed policy resumes the thread on its next
   // turn with the new base; Codex keeps base instructions out of history and compaction. The
   // model_instructions_file pointer to the same file remains the fallback.
@@ -201,6 +201,7 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
   // Memory stays suppressed at its producer; native AGENTS stays live.
   const skillsWrapper = `function renderCodexSkillsInstructions(params) {
   const policy = unblockFrozenPolicy(params.attempt);
+  if (policy !== null && params.attempt.bootstrapContextMode === "lightweight") return;
   const skills = unblockOriginalSkillsInstructions(params);
   if (policy === null) return skills;
   unblockRelay(params.attempt, "skills", skills);
@@ -211,6 +212,10 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
   const policy = unblockFrozenPolicy(params.params);
   const context = await unblockOriginalWorkspaceContext(params);
   if (policy === null) return context;
+  // OpenClaw skips bootstrap files, but can still carry cached workspace instructions.
+  if (params.params.bootstrapContextMode === "lightweight") return { ...context,
+    threadDeveloperInstructionFiles: [], threadDeveloperInstructions: undefined, promptContext: undefined,
+    personaInstructions: undefined, sharedPersonaInstructions: undefined, memoryInstructions: undefined };
   unblockRelay(params.params, "persona", context.${splitPersona ? "sharedPersonaInstructions" : "personaInstructions"});
   ${splitPersona ? `const personal = context.personaFiles?.filter(file => file.personalUser === true) ?? [];
   const personaInstructions = personal.length ? ["## Personal USER.md (current request only)", ...personal.map(file => "### " + file.path + "\\n\\n" + file.content)].join("\\n\\n") : undefined;` : "const personaInstructions = undefined;"}

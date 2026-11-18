@@ -1,5 +1,14 @@
 # Validation
 
+## Native lightweight Codex turns
+
+- OpenClaw/Codex 2026.10.9 with Codex app-server 0.166.0: a loopback Responses
+  capture compared full and lightweight Gateway turns in fresh sessions. Both
+  sent the brief and one copy of the fleet policy. Only full sent the AGENTS,
+  SOUL, skill-catalog, and memory-reference markers.
+- Adapter preparation accepted the published 2026.10.9 and 2026.11.5 layouts.
+  Repository preflight passed: 86 tests, both inspections, and package validation.
+
 ## OpenClaw/Codex 2026.11.5 and dedicated user homes — 2026-11-17
 
 - Published Codex bundles: 2026.10.9 still prepares six patches; 2026.11.5 prepares

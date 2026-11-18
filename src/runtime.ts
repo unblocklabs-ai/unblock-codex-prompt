@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readPromptPointer } from "./toml.js";
-import { parseClaudePolicy, parseEnrollment } from "./manager.js";
+import { isCodexPolicyBoundary, parseClaudePolicy, parseEnrollment } from "./manager.js";
 import { assertDedicatedCodexHome, configuredCodexHome } from "./codex-home.js";
 export { normalizeOpenClawAdditions, normalizeOpenClawTurnContext } from "./context.js";
 
@@ -69,9 +69,18 @@ export function readFrozenPolicy(agentDir: string, config?: unknown): string | n
  * The verified base file, sent as each managed thread's base instructions at start and resume.
  * Codex reads base instructions per session rather than from history, so a refreshed file
  * reaches an existing thread when OpenClaw resumes it; the file itself stays the fallback.
+ * Lightweight runs take only the recorded policy prefix, without the agent-context tail.
  */
-export function readCodexBaseInstructions(agentDir: string, config?: unknown): string | null {
-  return readCodexSnapshot(agentDir, config)?.prompt ?? null;
+export function readCodexBaseInstructions(agentDir: string, config?: unknown, contextMode?: "full" | "lightweight"): string | null {
+  const snapshot = readCodexSnapshot(agentDir, config);
+  if (!snapshot) return null;
+  const { bundle, prompt } = snapshot;
+  if (contextMode !== "lightweight") return prompt;
+  const boundary = "basePromptLength" in bundle ? bundle.basePromptLength : undefined;
+  if (!isCodexPolicyBoundary(prompt, boundary)) {
+    throw new Error("Frozen context boundary is ambiguous; run codex-prompt sync");
+  }
+  return prompt.slice(0, boundary);
 }
 
 export type ClaudeManagedContext = { policy: string; agentContext: string };

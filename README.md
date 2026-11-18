@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.5.3.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.6.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -30,8 +30,9 @@ skills in its system prompt instead, and that list is dropped with the rest of t
 
 **The fleet policy is live too.** On Codex the generated file (fleet policy and memory
 reference) replaces Codex's native base through `model_instructions_file`.
-The patched adapter also sends that same file as each thread's `baseInstructions` when
-OpenClaw starts or resumes it. Codex reads base instructions per session, not from
+The patched adapter also sends it as each thread's `baseInstructions` when
+OpenClaw starts or resumes it (only the policy prefix on lightweight turns).
+Codex reads base instructions per session, not from
 history, and OpenClaw fingerprints these requests, so a refreshed revision resumes an
 existing thread on its next turn with the new base: no duplicate copy, nothing in
 history, and compaction cannot revert it. If the adapter is ever missing, Codex still
@@ -41,7 +42,7 @@ developer instructions native children inherit, and suppresses the separate memo
 contribution. Cron guidance remains in its existing parent-local carrier. The optional
 managed model catalog removes native Default-mode prose.
 
-There are no bundled system/developer templates or base-only mode. Downloaded
+There are no bundled system/developer templates. Downloaded
 policy and the memory reference are written only to
 `<agentDir>/codex-home/unblock-codex-prompt.md`, outside the plugin directory.
 Codex reads that generated file; the plugin package does not retain its own copy
@@ -109,6 +110,15 @@ an older prompt-plugin install doesn't break Codex turns. The installer validate
 private seams and refuses unreviewed layouts.
 The skills catalog is OpenClaw's own per-session snapshot, with its eligibility,
 allowlist, visibility and size-limit logic; the plugin neither adds nor removes skills.
+
+### Lightweight Codex turns
+
+Use OpenClaw's native `lightContext: true` (for example, on `sessions_spawn`).
+The managed Codex turn keeps the fleet policy and runtime instructions, but omits
+workspace files, the OpenClaw skills catalog, and the bridge's memory reference.
+Tool permissions, approvals, history, and independent plugin hooks are unchanged.
+Use an isolated spawn when the worker should not inherit conversation history.
+Claude CLI and `unblock-memory` prompt hooks do not receive the lightweight signal.
 
 ## Claude CLI agents
 
@@ -361,7 +371,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.5.3.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.6.0.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -647,7 +657,7 @@ sync.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.5.3
+npm run release:check -- v0.6.0
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -657,7 +667,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.5.3 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.6.0 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

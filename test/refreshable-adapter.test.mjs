@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
 import { patchAdapterSources, prepareAdapter, installAdapter, planAdapterRestore, applyAdapterRestore, adapterStatus } from "../dist/adapter.js";
+import { compilePrompt } from "../dist/compiler.js";
 import { restorePrompt, syncPrompt } from "../dist/manager.js";
 const restoreAdapter = async agentDir => applyAdapterRestore(await planAdapterRestore(agentDir));
 import * as runtime from "../dist/runtime.js";
@@ -13,15 +14,16 @@ import * as runtime from "../dist/runtime.js";
 const fixture = JSON.parse(await readFile(new URL("./fixtures/adapter-refreshable.json", import.meta.url), "utf8"));
 const sources = Object.values(fixture.bundles);
 
-async function enroll(t, prompt, policy = "") {
+async function enroll(t, prompt, bundle = { schema: 1, policy: "" }) {
   const agentDir = await mkdtemp(join(await realpath(tmpdir()), "codex-bridge-context-"));
   t.after(() => rm(agentDir, { recursive: true }));
-  await syncPrompt({ agentDir, prompt, bundle: { schema: 1, policy } });
+  await syncPrompt({ agentDir, prompt, bundle });
   return agentDir;
 }
 
 test("refreshable layout delivers the live skills catalog and persona in thread developer instructions without a prompt-plugin install", async t => {
-  const agentDir = await enroll(t, "FLEET BASE A");
+  const compiled = await compilePrompt("FLEET BASE A", "/workspace");
+  const agentDir = await enroll(t, compiled.prompt, compiled.bundle);
   const patched = patchAdapterSources(sources, agentDir, "main");
   let liveTag = "A";
   let harnessContext = true;
@@ -66,9 +68,10 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
   const owner = name => contexts.find(context => typeof context[name] === "function");
   const params = { agentId: "main", disableTools: true, extraSystemPrompt: "ROUTING", gitCoauthorPrompt: "COAUTHOR", config: { plugins: { entries: { "unblock-codex-prompt": { enabled: true, config: { frozenContext: true } } } } } };
   // The reviewed prepareCodexAttemptContext order: workspace context, skills, then the thread request.
-  const render = async (attempt, { dynamicTools = [], skillsPrompt = `LIVE SKILLS ${liveTag}` } = {}) => {
+  const render = async (attempt, { dynamicTools = [], skillsPrompt = `LIVE SKILLS ${liveTag}`, cachedWorkspaceInstructions } = {}) => {
     const workspace = await owner("buildCodexWorkspaceBootstrapContext").buildCodexWorkspaceBootstrapContext({
-      params: attempt, resolvedWorkspace: "/workspace", executionWorkspace: "/project", effectiveWorkspace: "/project", sessionAgentId: "main", tools: dynamicTools,
+      params: attempt, agentWorkspaceDeveloperInstructions: cachedWorkspaceInstructions,
+      resolvedWorkspace: "/workspace", executionWorkspace: "/project", effectiveWorkspace: "/project", sessionAgentId: "main", tools: dynamicTools,
     });
     const skills = owner("renderCodexSkillsInstructions").renderCodexSkillsInstructions({ attempt, skillsPrompt, dynamicTools });
     const refreshable = globals.joinPresentSections(skills, workspace.sharedPersonaInstructions, workspace.memoryInstructions) || undefined;
@@ -83,7 +86,7 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
   const initial = await render(params);
   // Exactly upstream's skills rendering, then the persona, then the retained additions.
   assert.equal(initial.request.developerInstructions, "## OpenClaw Skills\nLIVE SKILLS A\n\nLIVE PERSONA A\n\nCOAUTHOR\n\nROUTING");
-  assert.equal(initial.request.baseInstructions, "FLEET BASE A");
+  assert.equal(initial.request.baseInstructions, compiled.prompt);
   // The relay is non-enumerable: request fingerprints and serialized params do not see it.
   assert.equal(JSON.stringify(params).includes("LIVE"), false);
   assert.deepEqual(Object.getOwnPropertySymbols(params).map(String), ["Symbol(unblock-codex-prompt.live-context)"]);
@@ -95,6 +98,15 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
   assert.equal(initial.request.cwd, "/project");
   assert.equal(initial.request.approvalPolicy, "never");
   assert.equal(initial.request.sandbox, "read-only");
+  const lightweight = { ...params, bootstrapContextMode: "lightweight" };
+  const worker = await render(lightweight, { cachedWorkspaceInstructions: "CACHED AGENTS" });
+  assert.equal(worker.request.baseInstructions, "FLEET BASE A");
+  assert.equal(worker.request.developerInstructions, "COAUTHOR\n\nROUTING");
+  assert.equal(worker.workspace.threadDeveloperInstructions, undefined);
+  assert.equal(worker.workspace.promptContext, undefined);
+  assert.equal(worker.refreshable, undefined);
+  assert.equal(worker.parent, null);
+  for (const key of ["cwd", "approvalPolicy", "sandbox"]) assert.equal(worker.request[key], initial.request[key]);
   const cron = await render({ ...params, trigger: "cron" });
   assert.match(cron.parent, /OpenClaw cron automation turn/);
   assert.doesNotMatch(cron.parent, /LIVE/);
@@ -153,7 +165,7 @@ test("refreshable layout delivers the live skills catalog and persona in thread 
   assert.equal(owner("buildDeveloperInstructions").buildDeveloperInstructions({ ...assembled }), "COAUTHOR\n\nROUTING");
 
   await writeFile(join(agentDir, "codex-home", "unblock-codex-prompt.md"), "foreign edit");
-  await assert.rejects(render(params), /Frozen prompt changed outside sync/);
+  await assert.rejects(render(lightweight), /Frozen prompt changed outside sync/);
   await restorePrompt({ agentDir, prompt: "" });
   const paused = await render(params);
   assert.match(paused.refreshable, /LIVE SKILLS B[^]*LIVE PERSONA B/);
@@ -298,7 +310,7 @@ test("refreshable bundles install idempotently, reject upstream/foreign changes 
 });
 
 test("managed Codex delivers the live skills catalog and the full host persona, personal overlay included, in instructions native children inherit", async t => {
-  const agentDir = await enroll(t, "FLEET BASE", "FLEET");
+  const agentDir = await enroll(t, "FLEET BASE", { schema: 1, policy: "FLEET" });
   const patched = patchAdapterSources(sources, agentDir, "main");
   const intro = "OpenClaw loaded these workspace instruction files from the active agent workspace. HOST PERSONAL RULE";
   const personaFiles = [{ path: "/workspace/SOUL.md", content: "LIVE SHARED SOUL" }, { path: "/workspace/users/p1/USER.md", content: "LIVE PERSONAL", personalUser: true }];

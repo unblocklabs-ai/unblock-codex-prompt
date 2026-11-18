@@ -27,6 +27,11 @@ export const MEMORY_REFERENCE_HEADER = "\n\n## Memory reference\n";
  */
 export const CONTEXT_BOUNDARY_HEADERS = [MEMORY_REFERENCE_HEADER, "\n\n## Agent context\n", "\n\n## Frozen agent context\n"] as const;
 
+export function isCodexPolicyBoundary(prompt: string, boundary: unknown): boundary is number {
+  return typeof boundary === "number" && Number.isInteger(boundary) && boundary > 0 &&
+    CONTEXT_BOUNDARY_HEADERS.some(header => prompt.startsWith(header, boundary));
+}
+
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 
 /** Strict shape check for a stored Claude policy; throws on anything else. */
@@ -281,8 +286,7 @@ export async function refreshSharedPrompt(agentDir: string, fetchers: { codex?: 
     // Every remote snapshot records its prefix length (0.1.0 onwards); the agent context after it
     // starts with one of the accepted boundary headings (current, 0.4 branch or 0.3).
     const boundary = bundle.basePromptLength;
-    if (codex && (typeof boundary !== "number" || !Number.isInteger(boundary) || boundary <= 0 ||
-        !CONTEXT_BOUNDARY_HEADERS.some(header => s.prompt!.slice(boundary).startsWith(header)))) {
+    if (codex && !isCodexPolicyBoundary(s.prompt, boundary)) {
       throw new Error("Frozen context boundary is ambiguous; run codex-prompt sync");
     }
     const [codexRemote, claudeRemote] = await Promise.all([codex ? fetchers.codex?.() : undefined, claude ? fetchers.claude?.() : undefined]);
