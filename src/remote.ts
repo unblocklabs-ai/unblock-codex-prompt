@@ -5,13 +5,16 @@ const MAX_BYTES = 256 * 1024;
 
 export const WORKER_RUNTIME_HINT = "deploy the fleet-prompt Worker with runtime support first";
 
+export type RemoteRuntime = "claude" | "codex-gpt-6.2";
+
 /**
  * Explicit sync and daily shared-prompt refresh validate before changing local state.
- * Without `runtime` the configured URL is fetched exactly as written (the Codex artifact, which
- * every Worker version serves). `runtime: "claude"` adds the parameter with the URL API, keeping
- * `channel` and any other parameters, and requires the Worker to confirm it in X-Prompt-Runtime.
+ * Without `runtime` the configured URL is fetched exactly as written (the standard Codex artifact,
+ * which every Worker version serves). Passing `runtime` (`claude` or `codex-gpt-6.2`) adds the
+ * parameter with the URL API, keeping `channel` and any other parameters, and requires the Worker
+ * to confirm it in X-Prompt-Runtime.
  */
-export async function fetchPrompt(url: string, request: typeof fetch = fetch, options: { runtime?: "claude" } = {}) {
+export async function fetchPrompt(url: string, request: typeof fetch = fetch, options: { runtime?: RemoteRuntime } = {}) {
   const target = validatePromptUrl(url);
   if (options.runtime) target.searchParams.set("runtime", options.runtime);
   const response = await request(target, {
@@ -50,7 +53,11 @@ export async function fetchPrompt(url: string, request: typeof fetch = fetch, op
   return { prompt, source: { url: options.runtime ? target.href : url, revision } };
 }
 
-/** Per-runtime fetchers for one configured promptUrl; Codex never sends `runtime`. */
+/** Per-runtime fetchers for one configured promptUrl; standard Codex never sends `runtime`. */
 export function policyFetchers(url: string, request?: typeof fetch) {
-  return { codex: () => fetchPrompt(url, request), claude: () => fetchPrompt(url, request, { runtime: "claude" }) };
+  return {
+    codex: () => fetchPrompt(url, request),
+    codexGpt62: () => fetchPrompt(url, request, { runtime: "codex-gpt-6.2" }),
+    claude: () => fetchPrompt(url, request, { runtime: "claude" }),
+  };
 }

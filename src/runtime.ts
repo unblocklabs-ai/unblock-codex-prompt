@@ -2,8 +2,10 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readPromptPointer } from "./toml.js";
-import { isCodexPolicyBoundary, parseClaudePolicy, parseEnrollment } from "./manager.js";
+import { isCodexPolicyBoundary, parseClaudePolicy, parseEnrollment, parseStoredPolicy } from "./manager.js";
 import { assertDedicatedCodexHome, configuredCodexHome } from "./codex-home.js";
+import { managedTargetAgent } from "./managed-target.js";
+import { classifyCodexModel, configuredCodexModelFamily, type CodexModelFamily } from "./model-family.js";
 export { normalizeOpenClawAdditions, normalizeOpenClawTurnContext } from "./context.js";
 
 function readPrivate(path: string) {
@@ -66,15 +68,38 @@ export function readFrozenPolicy(agentDir: string, config?: unknown): string | n
 }
 
 /**
- * The verified base file, sent as each managed thread's base instructions at start and resume.
- * Codex reads base instructions per session rather than from history, so a refreshed file
- * reaches an existing thread when OpenClaw resumes it; the file itself stays the fallback.
- * Lightweight runs take only the recorded policy prefix, without the agent-context tail.
+ * The verified base instructions for a managed Codex thread at start and resume.
+ * Picks the GPT-6.2 or standard Codex fleet policy from the active session's `modelId`
+ * (falling back to the agent's primary model in `config`, then the bundle's recorded primary).
+ * Codex reads base instructions per session rather than from history, so a refreshed policy
+ * or a model switch reaches an existing thread when OpenClaw resumes it; the base file stays
+ * the fallback. Lightweight runs take only the policy prefix, without the agent-context tail.
  */
-export function readCodexBaseInstructions(agentDir: string, config?: unknown, contextMode?: "full" | "lightweight"): string | null {
+export function readCodexBaseInstructions(agentDir: string, config?: unknown, contextMode?: "full" | "lightweight", modelId?: unknown): string | null {
   const snapshot = readCodexSnapshot(agentDir, config);
   if (!snapshot) return null;
   const { bundle, prompt } = snapshot;
+  const family: CodexModelFamily = typeof modelId === "string" && modelId.trim()
+    ? classifyCodexModel(modelId)
+    : config !== undefined
+      ? configuredCodexModelFamily(config, managedTargetAgent(config) ?? "main")
+      : "codexPrimaryFamily" in bundle && bundle.codexPrimaryFamily === "gpt-6.2"
+        ? "gpt-6.2"
+        : "default";
+  const hasSplitCodex = ("codexGpt62Policy" in bundle && bundle.codexGpt62Policy !== undefined) ||
+    ("codexDefaultPolicy" in bundle && bundle.codexDefaultPolicy !== undefined);
+  if (hasSplitCodex) {
+    const selected = family === "gpt-6.2"
+      ? parseStoredPolicy("codexGpt62Policy" in bundle ? bundle.codexGpt62Policy : undefined, "Codex GPT-6.2 policy")
+      : parseStoredPolicy("codexDefaultPolicy" in bundle ? bundle.codexDefaultPolicy : undefined, "Codex default policy");
+    const policyText = selected.text.trim();
+    if (contextMode === "lightweight") return policyText;
+    const boundary = "basePromptLength" in bundle ? bundle.basePromptLength : undefined;
+    if (!isCodexPolicyBoundary(prompt, boundary)) {
+      throw new Error("Frozen context boundary is ambiguous; run codex-prompt sync");
+    }
+    return `${policyText}${prompt.slice(boundary)}`;
+  }
   if (contextMode !== "lightweight") return prompt;
   const boundary = "basePromptLength" in bundle ? bundle.basePromptLength : undefined;
   if (!isCodexPolicyBoundary(prompt, boundary)) {

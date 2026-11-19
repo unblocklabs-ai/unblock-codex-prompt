@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MEMORY_REFERENCE_HEADER, readOptional, type ClaudePolicy, type FrozenBundle } from "./manager.js";
+import { MEMORY_REFERENCE_HEADER, readOptional, type ClaudePolicy, type FrozenBundle, type StoredPolicy } from "./manager.js";
+import type { CodexModelFamily } from "./model-family.js";
 import { assertSupportedVersion } from "./compatibility.js";
 import { policyFetchers } from "./remote.js";
 
@@ -38,27 +39,49 @@ function agentContextText(workspaceDir: string) {
  * - Claude only (`base` null): nothing Codex-specific is built. The file holds just the agent
  *   context, so its hash still anchors the bundle and refresh has no prefix to replace.
  */
-export async function compilePrompt(base: string | null, workspaceDir: string, claude?: ClaudePolicy) {
+export async function compilePrompt(base: string | null, workspaceDir: string, claude?: ClaudePolicy,
+  codexPolicies?: { default: StoredPolicy; gpt62: StoredPolicy; primaryFamily: CodexModelFamily }) {
   if (base === null && !claude) throw new Error("compilePrompt needs a Codex base, a Claude policy, or both");
   const agentContext = agentContextText(workspaceDir);
   const claudeFields = claude ? { claudePolicy: { ...claude, text: claude.text.trim() }, agentContext } : {};
+  const codexFields = codexPolicies ? {
+    codexDefaultPolicy: { ...codexPolicies.default, text: codexPolicies.default.text.trim() },
+    codexGpt62Policy: { ...codexPolicies.gpt62, text: codexPolicies.gpt62.text.trim() },
+    codexPrimaryFamily: codexPolicies.primaryFamily,
+  } : {};
   if (base === null) return { prompt: agentContext, bundle: { schema: 1 as const, policy: "", ...claudeFields } satisfies FrozenBundle };
   return { prompt: `${base.trim()}\n\n${agentContext}\n`, bundle: { schema: 1 as const, policy: "",
-    basePromptLength: base.trim().length, ...claudeFields } satisfies FrozenBundle };
+    basePromptLength: base.trim().length, ...codexFields, ...claudeFields } satisfies FrozenBundle };
 }
 
 /**
  * Everything a sync needs before it may write: every enrolled runtime's policy is fetched first
- * (Codex without `runtime`, Claude with runtime=claude). Any failure throws here, so nothing has
- * been written.
+ * (Codex: standard without `runtime` plus GPT-6.2 with `runtime=codex-gpt-6.2`; Claude: with
+ * `runtime=claude`). Any failure throws here, so nothing has been written.
  */
 export async function fetchAndCompile(options: { codex: boolean; claude: boolean; promptUrl: string; workspaceDir: string;
-  request?: typeof fetch; now?: number }) {
+  primaryFamily?: CodexModelFamily; request?: typeof fetch; now?: number }) {
   const fetchers = policyFetchers(options.promptUrl, options.request);
-  const [remote, claudeRemote] = await Promise.all([options.codex ? fetchers.codex() : undefined, options.claude ? fetchers.claude() : undefined]);
+  const [codexDefaultRemote, codexGpt62Remote, claudeRemote] = await Promise.all([
+    options.codex ? fetchers.codex() : undefined,
+    options.codex ? fetchers.codexGpt62() : undefined,
+    options.claude ? fetchers.claude() : undefined,
+  ]);
   const checkedAt = options.now ?? Date.now();
+  const primaryFamily: CodexModelFamily = options.primaryFamily ?? "default";
+  const codexDefault = codexDefaultRemote ? { text: codexDefaultRemote.prompt, ...codexDefaultRemote.source, checkedAt } : undefined;
+  const codexGpt62 = codexGpt62Remote ? { text: codexGpt62Remote.prompt, ...codexGpt62Remote.source, checkedAt } : undefined;
+  const fileRemote = codexDefaultRemote && codexGpt62Remote
+    ? (primaryFamily === "gpt-6.2" ? codexGpt62Remote : codexDefaultRemote)
+    : codexDefaultRemote;
   const claudePolicy = claudeRemote ? { text: claudeRemote.prompt, ...claudeRemote.source, checkedAt } : undefined;
-  const compiled = await compilePrompt(remote?.prompt ?? null, options.workspaceDir, claudePolicy);
-  if (remote) Object.assign(compiled.bundle, { remotePrompt: { ...remote.source, checkedAt } });
-  return { compiled, remote: remote?.source, claudePolicy: claudePolicy && { url: claudePolicy.url, revision: claudePolicy.revision, checkedAt } };
+  const compiled = await compilePrompt(fileRemote?.prompt ?? null, options.workspaceDir, claudePolicy,
+    codexDefault && codexGpt62 ? { default: codexDefault, gpt62: codexGpt62, primaryFamily } : undefined);
+  if (fileRemote) Object.assign(compiled.bundle, { remotePrompt: { ...fileRemote.source, checkedAt } });
+  const codexPolicies = codexDefault && codexGpt62 ? {
+    primaryFamily,
+    default: { url: codexDefault.url, revision: codexDefault.revision, checkedAt },
+    "gpt-6.2": { url: codexGpt62.url, revision: codexGpt62.revision, checkedAt },
+  } : undefined;
+  return { compiled, remote: fileRemote?.source, codexPolicies, claudePolicy: claudePolicy && { url: claudePolicy.url, revision: claudePolicy.revision, checkedAt } };
 }

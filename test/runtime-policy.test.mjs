@@ -9,6 +9,7 @@ import { fetchAndCompile } from "../dist/compiler.js";
 import { refreshSharedPrompt, restorePrompt, sha256, syncPrompt } from "../dist/manager.js";
 import { policyFetchers } from "../dist/remote.js";
 import { refreshFailure } from "../dist/refresh-error.js";
+import { classifyCodexModel, configuredCodexModelFamily } from "../dist/model-family.js";
 import { readClaudeManagedContext, readCodexBaseInstructions, readFrozenPolicy } from "../dist/runtime.js";
 
 /** The managed part of the Claude prompt: policy, then the memory reference (workspace files follow in the hook). */
@@ -20,9 +21,9 @@ function readClaudeManagedPrompt(agentDir) {
 const { Command } = createRequire(import.meta.resolve("openclaw/plugin-sdk/plugin-entry"))("commander");
 const url = "https://fleet-prompt.example.test/prompt?channel=prod";
 
-/** A stand-in for the fleet-prompt Worker. `legacy` models the deployed Worker: unknown parameters are HTTP 400. */
+/** A stand-in for the fleet-prompt Worker. `legacy` models a pre-runtime Worker: unknown parameters are HTTP 400. */
 function worker({ legacy = false, confirmRuntime = true } = {}) {
-  const served = { codex: "CODEX POLICY A", claude: "CLAUDE POLICY A" };
+  const served = { codex: "CODEX POLICY A", "codex-gpt-6.2": "CODEX GPT-6.2 POLICY A", claude: "CLAUDE POLICY A" };
   const calls = [];
   const request = async target => {
     const requested = new URL(String(target));
@@ -43,25 +44,67 @@ const files = agentDir => {
 };
 const bundleOf = async agentDir => JSON.parse(await readFile(files(agentDir).bundle, "utf8"));
 
-async function sync(agentDir, w, { codex, claude, adopt = false }) {
-  const { compiled } = await fetchAndCompile({ codex, claude, promptUrl: url, workspaceDir: agentDir, request: w.request, now: 100 });
+async function sync(agentDir, w, { codex, claude, adopt = false, primaryFamily }) {
+  const { compiled } = await fetchAndCompile({ codex, claude, promptUrl: url, workspaceDir: agentDir, primaryFamily, request: w.request, now: 100 });
   return syncPrompt({ agentDir, ...compiled }, { runtimes: [...codex ? ["codex"] : [], ...claude ? ["claude-cli"] : []], adopt });
 }
 
-test("Codex-only sync and refresh never send runtime= and work against a Worker that rejects it", async () => {
-  const w = worker({ legacy: true });
+test("Codex-only sync and refresh fetch standard Codex (no runtime=) and GPT-6.2 (runtime=codex-gpt-6.2) and switch per session model", async () => {
+  const w = worker();
   const agentDir = await dir("codex-policy");
   await sync(agentDir, w, { codex: true, claude: false });
   await refreshSharedPrompt(agentDir, w.fetchers);
-  assert.equal(w.calls.length, 2);
-  for (const call of w.calls) assert.equal(call.href, url, "the configured URL is requested exactly as written");
+  assert.equal(w.calls.length, 4);
+  const standardCalls = w.calls.filter(call => !call.searchParams.has("runtime"));
+  const gpt62Calls = w.calls.filter(call => call.searchParams.get("runtime") === "codex-gpt-6.2");
+  assert.equal(standardCalls.length, 2);
+  assert.equal(gpt62Calls.length, 2);
+  for (const call of standardCalls) assert.equal(call.href, url, "standard Codex requests the configured URL as written");
   assert.equal(readFrozenPolicy(agentDir), "");
   assert.match(readCodexBaseInstructions(agentDir), /^CODEX POLICY A\n\n## Memory reference\n[^]*conversations\.\n$/);
+  assert.match(readCodexBaseInstructions(agentDir, undefined, "full", "openai/gpt-6.2-astra"), /^CODEX GPT-6\.2 POLICY A\n\n## Memory reference\n[^]*conversations\.\n$/);
+  assert.equal(readCodexBaseInstructions(agentDir, undefined, "lightweight", "gpt-6.2-sol"), "CODEX GPT-6.2 POLICY A");
+  assert.equal(readCodexBaseInstructions(agentDir, undefined, "lightweight", "gpt-6"), "CODEX POLICY A");
   assert.doesNotMatch(readCodexBaseInstructions(agentDir), /skills catalog/i);
   const bundle = await bundleOf(agentDir);
   assert.equal("claudePolicy" in bundle || "agentContext" in bundle, false);
   assert.equal(bundle.policy, "");
   assert.equal(bundle.remotePrompt.url, url);
+  assert.equal(bundle.codexGpt62Policy.url, `${url}&runtime=codex-gpt-6.2`);
+});
+
+test("model-family classification and openclaw.json primary detection route gpt-6.2* vs non-6.2 models cleanly", async () => {
+  for (const id of ["gpt-6.2", "gpt-6.2-astra", "gpt-6.2-sol", "openai/gpt-6.2-astra", "openai-codex/gpt-6.2-2026-11-18", "OPENAI/GPT-6.2_PREVIEW"]) {
+    assert.equal(classifyCodexModel(id), "gpt-6.2", id);
+  }
+  for (const id of ["gpt-6", "gpt-6.1", "gpt-6.20", "openai/gpt-6-astra", "gpt-5.4", "claude-opus-5", "", undefined, null]) {
+    assert.equal(classifyCodexModel(id), "default", String(id));
+  }
+  const gpt62Config = { agents: { defaults: { model: { primary: "openai/gpt-6" } }, list: [{ id: "main", model: { primary: "openai/gpt-6.2-astra" } }] } };
+  const defaultConfig = { agents: { defaults: { model: { primary: "openai/gpt-6" } }, list: [{ id: "main" }] } };
+  assert.equal(configuredCodexModelFamily(gpt62Config, "main"), "gpt-6.2");
+  assert.equal(configuredCodexModelFamily(defaultConfig, "main"), "default");
+
+  // Primary GPT-6.2 writes the GPT-6.2 policy into the fallback prompt file while retaining standard Codex in the bundle.
+  const w = worker();
+  const agentDir = await dir("codex-primary-62");
+  await sync(agentDir, w, { codex: true, claude: false, primaryFamily: "gpt-6.2" });
+  const promptFile = await readFile(files(agentDir).prompt, "utf8");
+  assert.match(promptFile, /^CODEX GPT-6\.2 POLICY A\n\n## Memory reference\n/);
+  // Without session modelId, config's primary model decides; an explicit session modelId overrides config.
+  assert.match(readCodexBaseInstructions(agentDir, gpt62Config), /^CODEX GPT-6\.2 POLICY A\n\n## Memory reference\n/);
+  assert.match(readCodexBaseInstructions(agentDir, defaultConfig), /^CODEX POLICY A\n\n## Memory reference\n/);
+  assert.match(readCodexBaseInstructions(agentDir, gpt62Config, "full", "openai/gpt-6"), /^CODEX POLICY A\n\n## Memory reference\n/);
+  assert.match(readCodexBaseInstructions(agentDir, defaultConfig, "full", "openai/gpt-6.2-astra"), /^CODEX GPT-6\.2 POLICY A\n\n## Memory reference\n/);
+
+  // Updating only the GPT-6.2 policy on refresh flags nextCodexTurn and updates both file and bundle.
+  w.served["codex-gpt-6.2"] = "CODEX GPT-6.2 POLICY B";
+  const refreshed = await refreshSharedPrompt(agentDir, w.fetchers, 200, { primaryFamily: "gpt-6.2" });
+  assert.equal(refreshed.changed, true);
+  assert.equal(refreshed.nextCodexTurn, true);
+  assert.equal(refreshed.codexGpt62Revision, sha256("CODEX GPT-6.2 POLICY B"));
+  assert.match(await readFile(files(agentDir).prompt, "utf8"), /^CODEX GPT-6\.2 POLICY B\n\n## Memory reference\n/);
+  assert.match(readCodexBaseInstructions(agentDir, gpt62Config, "full", "gpt-6"), /^CODEX POLICY A\n\n## Memory reference\n/);
 });
 
 test("Claude-only sync never requests the Codex artifact; the prompt file is the agent context", async () => {
@@ -90,16 +133,23 @@ test("Claude-only sync never requests the Codex artifact; the prompt file is the
   assert.match(readClaudeManagedPrompt(agentDir), /^CLAUDE POLICY B\n\n## Memory reference\n/);
 });
 
-test("a both-runtime sync makes exactly two fetches: Codex without runtime, Claude with runtime=claude, channel preserved", async () => {
+test("a both-runtime sync fetches Codex (default + gpt-6.2) and Claude, channel preserved", async () => {
   const w = worker();
   const agentDir = await dir("both-policy");
-  const { remote, claudePolicy } = await fetchAndCompile({ codex: true, claude: true, promptUrl: url, workspaceDir: agentDir, request: w.request, now: 5 });
-  assert.equal(w.calls.length, 2);
+  const { remote, codexPolicies, claudePolicy } = await fetchAndCompile({ codex: true, claude: true, promptUrl: url, workspaceDir: agentDir, request: w.request, now: 5 });
+  assert.equal(w.calls.length, 3);
   const [codexCall] = w.calls.filter(call => !call.searchParams.has("runtime"));
-  const [claudeCall] = w.calls.filter(call => call.searchParams.has("runtime"));
+  const [gpt62Call] = w.calls.filter(call => call.searchParams.get("runtime") === "codex-gpt-6.2");
+  const [claudeCall] = w.calls.filter(call => call.searchParams.get("runtime") === "claude");
   assert.equal(codexCall.href, url);
+  assert.deepEqual([...gpt62Call.searchParams], [["channel", "prod"], ["runtime", "codex-gpt-6.2"]]);
   assert.deepEqual([...claudeCall.searchParams], [["channel", "prod"], ["runtime", "claude"]]);
   assert.deepEqual([remote.url, claudePolicy], [url, { url: claudeCall.href, revision: sha256("CLAUDE POLICY A"), checkedAt: 5 }]);
+  assert.deepEqual(codexPolicies, {
+    primaryFamily: "default",
+    default: { url, revision: sha256("CODEX POLICY A"), checkedAt: 5 },
+    "gpt-6.2": { url: gpt62Call.href, revision: sha256("CODEX GPT-6.2 POLICY A"), checkedAt: 5 },
+  });
   await sync(agentDir, w, { codex: true, claude: true });
   const bundle = await bundleOf(agentDir);
   assert.equal(bundle.claudePolicy.text, "CLAUDE POLICY A");
@@ -165,13 +215,13 @@ test("a failed fetch of either runtime writes nothing, and a Worker without runt
   const legacy = worker({ legacy: true });
   legacy.served.codex = "CODEX POLICY B";
   const failures = [
-    [legacy.request, /HTTP 400 for runtime=claude; deploy the fleet-prompt Worker with runtime support first/],
-    [worker({ confirmRuntime: false }).request, /did not confirm runtime=claude; deploy the fleet-prompt Worker/],
+    [legacy.request, /HTTP 400 for runtime=(?:codex-gpt-6\.2|claude); deploy the fleet-prompt Worker with runtime support first/],
+    [worker({ confirmRuntime: false }).request, /did not confirm runtime=(?:codex-gpt-6\.2|claude); deploy the fleet-prompt Worker/],
     [async target => { if (new URL(String(target)).searchParams.has("runtime")) throw new Error("offline"); return w.request(target); }, /offline/],
     [async target => new URL(String(target)).searchParams.has("runtime") ? new Response("down", { status: 503, headers: { "content-type": "text/plain" } }) : w.request(target), /HTTP 503/],
   ];
   for (const [request, error] of failures) {
-    // Codex is fetched successfully (and would have changed) but Claude fails: nothing may be written.
+    // Codex is fetched successfully (and would have changed) but another runtime fails: nothing may be written.
     await assert.rejects(refreshSharedPrompt(agentDir, policyFetchers(url, request), 999), error);
     assert.deepEqual(await snapshot(), before);
     await assert.rejects(sync(await dir("failed-sync"), { request }, { codex: true, claude: true }), error);
@@ -181,7 +231,7 @@ test("a failed fetch of either runtime writes nothing, and a Worker without runt
   await assert.rejects(readdir(join(fresh, "codex-home")), /ENOENT/);
   // The safe daily-refresh diagnostic keeps the actionable cause and nothing else.
   const diagnostic = await refreshSharedPrompt(agentDir, policyFetchers(url, legacy.request)).catch(error => refreshFailure("shared prompt", error).message);
-  assert.equal(diagnostic, "shared prompt: Prompt endpoint returned HTTP 400 for runtime=claude; deploy the fleet-prompt Worker with runtime support first");
+  assert.match(diagnostic, /^shared prompt: Prompt endpoint returned HTTP 400 for runtime=(?:codex-gpt-6\.2|claude); deploy the fleet-prompt Worker with runtime support first$/);
 });
 
 test("a Claude-enrolled bundle without a valid Claude policy is an invalid state, never an upstream render", async () => {
@@ -236,8 +286,14 @@ test("status reports each runtime's policy revision and never policy text", asyn
   await program.parseAsync(["node", "fixture", "codex-prompt", "status"]);
   const status = JSON.parse(output.at(-1));
   assert.deepEqual(status.remotePrompt, { url, revision: sha256("CODEX POLICY A"), checkedAt: 100 });
+  assert.deepEqual(status.codexPolicies, {
+    primaryFamily: "default",
+    default: { url, revision: sha256("CODEX POLICY A"), checkedAt: 100 },
+    "gpt-6.2": { url: `${url}&runtime=codex-gpt-6.2`, revision: sha256("CODEX GPT-6.2 POLICY A"), checkedAt: 100 },
+  });
+  assert.equal(status.configuredCodexFamily, "default");
   assert.deepEqual(status.claudePolicy, { url: `${url}&runtime=claude`, revision: sha256("CLAUDE POLICY A"), checkedAt: 100 });
-  assert.doesNotMatch(output.at(-1), /CLAUDE POLICY A|CODEX POLICY A|## Memory reference/);
+  assert.doesNotMatch(output.at(-1), /CLAUDE POLICY A|CODEX POLICY A|CODEX GPT-6\.2 POLICY A|## Memory reference/);
 
   await restorePrompt({ agentDir, prompt: "" });
   output.length = 0;

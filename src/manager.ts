@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { agentCodexHome, assertDedicatedCodexHome } from "./codex-home.js";
+import type { CodexModelFamily } from "./model-family.js";
 import { readPromptPointer, setPromptPointer } from "./toml.js";
 
 export const RUNTIMES = ["codex", "claude-cli"] as const;
@@ -10,15 +11,19 @@ export type ManagedRuntime = typeof RUNTIMES[number];
 export type Enrollment = { active: boolean; previousPointer: string | null; runtimes: ManagedRuntime[]; codexHome?: string };
 /** A fetched fleet policy and its provenance. Metadata (never `text`) is safe to report. */
 export type PolicyReceipt = { url: string; revision: string; checkedAt: number };
-export type ClaudePolicy = PolicyReceipt & { text: string };
+export type StoredPolicy = PolicyReceipt & { text: string };
+export type ClaudePolicy = StoredPolicy;
 /**
  * `policy` stays "" (0.3 runtimes require the field; they read only `schema`, `policy` and
- * `promptSha256`). The Codex policy is the prompt-file prefix, with `basePromptLength` and
- * `remotePrompt` describing it. Claude's policy and the shared agent context live in the bundle
- * itself, so Claude never reads the Codex artifact.
+ * `promptSha256`). The primary Codex policy is the prompt-file prefix, with `basePromptLength`
+ * and `remotePrompt` describing it. Both Codex model-family policies (`codexDefaultPolicy`,
+ * `codexGpt62Policy`) and Claude's policy live in the bundle so each turn picks the right
+ * artifact for its active model without re-syncing.
  */
 export type FrozenBundle = { schema: 1; policy: string; basePromptLength?: number;
-  remotePrompt?: { url: string; revision: string; checkedAt?: number }; claudePolicy?: ClaudePolicy; agentContext?: string };
+  remotePrompt?: { url: string; revision: string; checkedAt?: number };
+  codexDefaultPolicy?: StoredPolicy; codexGpt62Policy?: StoredPolicy; codexPrimaryFamily?: CodexModelFamily;
+  claudePolicy?: ClaudePolicy; agentContext?: string };
 /** First heading of the agent context, the boundary after the shared policy prefix. */
 export const MEMORY_REFERENCE_HEADER = "\n\n## Memory reference\n";
 /**
@@ -34,13 +39,18 @@ export function isCodexPolicyBoundary(prompt: string, boundary: unknown): bounda
 
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 
-/** Strict shape check for a stored Claude policy; throws on anything else. */
-export function parseClaudePolicy(value: unknown): ClaudePolicy {
+/** Strict shape check for a stored policy; throws on anything else. */
+export function parseStoredPolicy(value: unknown, label = "Stored policy"): StoredPolicy {
   if (!record(value) || typeof value.text !== "string" || !value.text.trim() || typeof value.url !== "string" || !value.url ||
       typeof value.revision !== "string" || !value.revision || typeof value.checkedAt !== "number" || !Number.isFinite(value.checkedAt)) {
-    throw new Error("Claude policy missing or invalid; run codex-prompt sync");
+    throw new Error(`${label} missing or invalid; run codex-prompt sync`);
   }
   return { text: value.text, url: value.url, revision: value.revision, checkedAt: value.checkedAt };
+}
+
+/** Strict shape check for a stored Claude policy; throws on anything else. */
+export function parseClaudePolicy(value: unknown): ClaudePolicy {
+  return parseStoredPolicy(value, "Claude policy");
 }
 export type PromptTarget = { agentDir: string; prompt: string; bundle?: FrozenBundle; codexHome?: string };
 
@@ -264,7 +274,9 @@ export type FetchedPolicy = () => Promise<{ prompt: string; source: { url: strin
  *   older sync keeps its frozen skills catalog tail until the next sync rewrites the file;
  * - Claude: only `claudePolicy` in the bundle is replaced; the prompt file is not touched for it.
  */
-export async function refreshSharedPrompt(agentDir: string, fetchers: { codex?: FetchedPolicy; claude?: FetchedPolicy }, now = Date.now()) {
+export async function refreshSharedPrompt(agentDir: string,
+  fetchers: { codex?: FetchedPolicy; codexGpt62?: FetchedPolicy; claude?: FetchedPolicy },
+  now = Date.now(), options: { primaryFamily?: CodexModelFamily } = {}) {
   const target = { agentDir, prompt: "" };
   return withLock(target, async () => {
     const s = await snapshot(target);
@@ -283,23 +295,44 @@ export async function refreshSharedPrompt(agentDir: string, fetchers: { codex?: 
       try { previousClaude = parseClaudePolicy(bundle.claudePolicy); } catch { throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync"); }
       if (typeof bundle.agentContext !== "string" || !bundle.agentContext.trim()) throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync");
     }
+    let previousCodexDefault: StoredPolicy | undefined;
+    if (codex && "codexDefaultPolicy" in bundle && bundle.codexDefaultPolicy !== undefined) {
+      try { previousCodexDefault = parseStoredPolicy(bundle.codexDefaultPolicy, "Codex default policy"); }
+      catch { throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync"); }
+    }
+    let previousCodexGpt62: StoredPolicy | undefined;
+    if (codex && "codexGpt62Policy" in bundle && bundle.codexGpt62Policy !== undefined) {
+      try { previousCodexGpt62 = parseStoredPolicy(bundle.codexGpt62Policy, "Codex GPT-6.2 policy"); }
+      catch { throw new Error("Valid enrolled remote snapshot required; run codex-prompt sync"); }
+    }
     // Every remote snapshot records its prefix length (0.1.0 onwards); the agent context after it
     // starts with one of the accepted boundary headings (current, 0.4 branch or 0.3).
     const boundary = bundle.basePromptLength;
     if (codex && !isCodexPolicyBoundary(s.prompt, boundary)) {
       throw new Error("Frozen context boundary is ambiguous; run codex-prompt sync");
     }
-    const [codexRemote, claudeRemote] = await Promise.all([codex ? fetchers.codex?.() : undefined, claude ? fetchers.claude?.() : undefined]);
+    const [codexRemote, codexGpt62Remote, claudeRemote] = await Promise.all([
+      codex ? fetchers.codex?.() : undefined,
+      codex ? fetchers.codexGpt62?.() : undefined,
+      claude ? fetchers.claude?.() : undefined,
+    ]);
     if ((codex && !codexRemote) || (claude && !claudeRemote)) throw new Error("Invalid shared prompt revision");
-    for (const remote of [codexRemote, claudeRemote]) {
+    for (const remote of [codexRemote, codexGpt62Remote, claudeRemote]) {
       if (remote && (!remote.prompt.trim() || remote.source.revision !== sha256(remote.prompt))) throw new Error("Invalid shared prompt revision");
     }
     if (await readOptional(s.files.config) !== s.config || await readOptional(s.files.state) !== s.state) throw new Error("Enrollment or configuration changed during refresh");
-    const prompt = codexRemote ? codexRemote.prompt.trim() + s.prompt.slice(boundary as number) : s.prompt;
+    const primaryFamily: CodexModelFamily = options.primaryFamily ?? (bundle.codexPrimaryFamily === "gpt-6.2" ? "gpt-6.2" : "default");
+    const fileRemote = codexRemote ? (primaryFamily === "gpt-6.2" && codexGpt62Remote ? codexGpt62Remote : codexRemote) : undefined;
+    const prompt = fileRemote ? fileRemote.prompt.trim() + s.prompt.slice(boundary as number) : s.prompt;
+    const codexDefaultPolicy: StoredPolicy | undefined = codexRemote ? { text: codexRemote.prompt.trim(), url: codexRemote.source.url,
+      revision: codexRemote.source.revision, checkedAt: now } : undefined;
+    const codexGpt62Policy: StoredPolicy | undefined = codexGpt62Remote ? { text: codexGpt62Remote.prompt.trim(), url: codexGpt62Remote.source.url,
+      revision: codexGpt62Remote.source.revision, checkedAt: now } : undefined;
     const claudePolicy: ClaudePolicy | undefined = claudeRemote ? { text: claudeRemote.prompt.trim(), url: claudeRemote.source.url,
       revision: claudeRemote.source.revision, checkedAt: now } : undefined;
     const nextBundle = `${JSON.stringify({ ...bundle,
-      ...codexRemote ? { basePromptLength: codexRemote.prompt.trim().length, remotePrompt: { ...codexRemote.source, checkedAt: now } } : {},
+      ...fileRemote ? { basePromptLength: fileRemote.prompt.trim().length, remotePrompt: { ...fileRemote.source, checkedAt: now } } : {},
+      ...codexDefaultPolicy && codexGpt62Policy ? { codexDefaultPolicy, codexGpt62Policy, codexPrimaryFamily: primaryFamily } : {},
       ...claudePolicy ? { claudePolicy } : {}, promptSha256: sha256(prompt) }, null, 2)}\n`;
     const changed = await replaceFile(s.files.prompt, s.prompt, prompt);
     try { await replaceFile(s.files.bundle, previousBundle, nextBundle); }
@@ -308,11 +341,15 @@ export async function refreshSharedPrompt(agentDir: string, fetchers: { codex?: 
       if (changed) await replaceFile(s.files.prompt, prompt, s.prompt);
       throw error;
     }
+    const codexDefaultChanged = codexDefaultPolicy !== undefined && previousCodexDefault !== undefined && codexDefaultPolicy.text !== previousCodexDefault.text;
+    const codexGpt62Changed = codexGpt62Policy !== undefined && (previousCodexGpt62 === undefined || codexGpt62Policy.text !== previousCodexGpt62.text);
+    const codexChanged = changed || codexDefaultChanged || codexGpt62Changed;
     const claudeChanged = claudePolicy !== undefined && claudePolicy.text !== previousClaude?.text;
     // Codex's reviewed bridge resends the base file as each thread's base instructions, so a change
     // re-syncs existing threads on their next turn; Claude's prompt hook reads the policy every turn.
-    return { changed: changed || claudeChanged, checkedAt: now,
-      ...codexRemote ? { revision: codexRemote.source.revision, nextCodexTurn: changed } : {},
+    return { changed: codexChanged || claudeChanged, checkedAt: now,
+      ...fileRemote ? { revision: fileRemote.source.revision, nextCodexTurn: codexChanged } : {},
+      ...codexGpt62Remote ? { codexGpt62Revision: codexGpt62Remote.source.revision } : {},
       ...claudeRemote ? { claudeRevision: claudeRemote.source.revision, nextClaudeProcess: claudeChanged } : {} };
   });
 }

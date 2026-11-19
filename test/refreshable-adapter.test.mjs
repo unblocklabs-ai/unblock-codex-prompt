@@ -356,3 +356,48 @@ test("managed Codex delivers the live skills catalog and the full host persona, 
   assert.match(upstream.sharedPersonaInstructions, /LIVE SHARED SOUL/);
   assert.equal(context.renderCodexSkillsInstructions({ attempt: { ...params, agentId: "other" }, skillsPrompt: catalog, dynamicTools: [] }), "## OpenClaw Skills\n" + catalog);
 });
+
+test("patched buildCodexThreadConfiguration selects GPT-6.2 vs standard Codex baseInstructions per session modelId", async t => {
+  const compiled = await compilePrompt("STD BASE", "/workspace", undefined, {
+    default: { text: "STD BASE", url: "https://example.test/prompt", revision: "rev-std", checkedAt: 10 },
+    gpt62: { text: "GPT62 BASE", url: "https://example.test/prompt?runtime=codex-gpt-6.2", revision: "rev-62", checkedAt: 10 },
+    primaryFamily: "default",
+  });
+  const agentDir = await enroll(t, compiled.prompt, compiled.bundle);
+  const patched = patchAdapterSources(sources, agentDir, "main");
+  const globals = {
+    unblockPromptCreateRequire: createRequire,
+    joinPresentSections: (...parts) => parts.filter(part => part?.trim()).join("\n\n"),
+    buildCodexRuntimeThreadConfigForRun: (_params, config) => config,
+    resolveDirectOnlyToolNamespaces: () => [],
+    resolveCodexThreadApprovalsReviewer: () => "user",
+    codexThreadSandboxOrPermissions: () => ({ sandbox: "read-only" }),
+    listRegisteredPluginAgentPromptGuidance: () => [],
+    SKILL_WORKSHOP_TOOL_NAME: "skill_workshop",
+    buildCredentialSafetyPrompt: () => "",
+    isMessageOnlyCodexSourceReply: () => false,
+  };
+  const owner = patched.map(source => {
+    const ctx = vm.createContext({ ...globals });
+    vm.runInContext(source.replace(/^import .*;\n/mu, "").replace("import.meta.url", '"file:///adapter.js"'), ctx);
+    return ctx;
+  }).find(ctx => typeof ctx.buildCodexThreadConfiguration === "function");
+  const baseConfig = {
+    agents: { list: [{ id: "main", model: { primary: "openai/gpt-6" } }] },
+    plugins: { entries: { "unblock-codex-prompt": { enabled: true, config: { frozenContext: true } } } },
+  };
+  const opts = { config: {}, cwd: "/project", appServer: { start: {}, approvalPolicy: "never" } };
+  const stdReq = owner.buildCodexThreadConfiguration({ agentId: "main", modelId: "openai/gpt-6", config: baseConfig }, opts);
+  const gpt62Req = owner.buildCodexThreadConfiguration({ agentId: "main", modelId: "openai/gpt-6.2-astra", config: baseConfig }, opts);
+  const light62Req = owner.buildCodexThreadConfiguration({ agentId: "main", modelId: "gpt-6.2-sol", bootstrapContextMode: "lightweight", config: baseConfig }, opts);
+  const overrideReq = owner.buildCodexThreadConfiguration({ agentId: "main", modelId: "gpt-6", config: baseConfig }, { ...opts, model: "gpt-6.2-astra" });
+  const configFallbackReq = owner.buildCodexThreadConfiguration({
+    agentId: "main",
+    config: { ...baseConfig, agents: { list: [{ id: "main", model: { primary: "openai/gpt-6.2-astra" } }] } },
+  }, opts);
+  assert.match(stdReq.baseInstructions, /^STD BASE\n\n## Memory reference\n/);
+  assert.match(gpt62Req.baseInstructions, /^GPT62 BASE\n\n## Memory reference\n/);
+  assert.equal(light62Req.baseInstructions, "GPT62 BASE");
+  assert.match(overrideReq.baseInstructions, /^GPT62 BASE\n\n## Memory reference\n/);
+  assert.match(configFallbackReq.baseInstructions, /^GPT62 BASE\n\n## Memory reference\n/);
+});

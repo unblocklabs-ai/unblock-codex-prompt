@@ -42,7 +42,11 @@ test("automatic refresh logs every failing component safely while successful com
     "unblock-codex-prompt": { enabled: true, config: { frozenContext: true, suppressExplicitDelegationPrompt: true, promptUrl: url } },
   } } };
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response("UPDATED BASE", { headers: { "content-type": "text/plain", "x-prompt-revision": sha256("UPDATED BASE") } });
+  globalThis.fetch = async target => {
+    const runtime = new URL(String(target)).searchParams.get("runtime");
+    const body = runtime === "codex-gpt-6.2" ? "UPDATED GPT62 BASE" : "UPDATED BASE";
+    return new Response(body, { headers: { "content-type": "text/plain", "x-prompt-revision": sha256(body), ...runtime ? { "x-prompt-runtime": runtime } : {} } });
+  };
   t.after(async () => { await service.stop(); globalThis.fetch = originalFetch; });
   await service.start({ config, logger: { info() {}, error: value => { logs.push(value); nextError.resolve(value); } } });
   t.mock.timers.tick(0);
@@ -172,9 +176,16 @@ test("remote-only CLI sync installs both prompt replacements; refresh and restor
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
   let remoteText = "REMOTE A\nKeep literal {{identity}}.";
-  globalThis.fetch = async url => {
-    assert.equal(String(url), settings.promptUrl);
-    return new Response(remoteText, { headers: { "content-type": "text/plain", "x-prompt-revision": sha256(remoteText) } });
+  let remoteGpt62Text = "REMOTE GPT62 A";
+  globalThis.fetch = async target => {
+    const parsed = new URL(String(target));
+    const runtime = parsed.searchParams.get("runtime");
+    if (runtime === null) {
+      assert.equal(String(target), settings.promptUrl);
+      return new Response(remoteText, { headers: { "content-type": "text/plain", "x-prompt-revision": sha256(remoteText) } });
+    }
+    assert.equal(runtime, "codex-gpt-6.2");
+    return new Response(remoteGpt62Text, { headers: { "content-type": "text/plain", "x-prompt-revision": sha256(remoteGpt62Text), "x-prompt-runtime": runtime } });
   };
   await run("sync", "--codex-plugin-dir", packageDir);
   const home = join(agentDir, "codex-home");

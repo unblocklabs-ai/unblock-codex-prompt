@@ -10,7 +10,8 @@ import { managedTargetAgent } from "./managed-target.js";
 import { readClaudeManagedContext, readFrozenPolicy } from "./runtime.js";
 import { detectConfiguredRuntimes, runtimePolicyResolver } from "./runtimes.js";
 import { policyFetchers } from "./remote.js";
-import { parseClaudePolicy, readOptional } from "./manager.js";
+import { parseClaudePolicy, parseStoredPolicy, readOptional } from "./manager.js";
+import { configuredCodexModelFamily } from "./model-family.js";
 import { isAbsolute, join } from "node:path";
 import { CATALOG_REFRESH_MS, catalogStatus, refreshCatalog, restoreCatalog, startCatalogRefresh } from "./catalog.js";
 import { codexSkillsStatus, refreshCodexSkills, removeCodexSkills } from "./skills.js";
@@ -27,6 +28,20 @@ function claudePolicyReceipt(bundle: unknown) {
   catch { return null; }
 }
 
+function codexPoliciesReceipt(bundle: unknown) {
+  if (!bundle || typeof bundle !== "object") return null;
+  const parse = (key: string, label: string) => {
+    if (!(key in bundle)) return null;
+    try { const { url, revision, checkedAt } = parseStoredPolicy((bundle as Record<string, unknown>)[key], label); return { url, revision, checkedAt }; }
+    catch { return null; }
+  };
+  const standard = parse("codexDefaultPolicy", "Codex default policy");
+  const gpt62 = parse("codexGpt62Policy", "Codex GPT-6.2 policy");
+  if (!standard && !gpt62) return null;
+  const primaryFamily = "codexPrimaryFamily" in bundle && bundle.codexPrimaryFamily === "gpt-6.2" ? "gpt-6.2" as const : "default" as const;
+  return { primaryFamily, ...standard ? { default: standard } : {}, ...gpt62 ? { "gpt-6.2": gpt62 } : {} };
+}
+
 async function refresh(target: Target, automatic = false) {
   const failures: unknown[] = [];
   const enrollment = await readEnrollment(target.agentDir);
@@ -39,7 +54,8 @@ async function refresh(target: Target, automatic = false) {
   if (codex && target.settings.suppressExplicitDelegationPrompt) {
     try { catalog = await refreshCatalog(target.agentDir, { automatic }); } catch (error) { failures.push(refreshFailure("catalog", error)); }
   }
-  try { prompt = await refreshSharedPrompt(target.agentDir, policyFetchers(target.settings.promptUrl)); } catch (error) { failures.push(refreshFailure("shared prompt", error)); }
+  const primaryFamily = configuredCodexModelFamily(target.config, target.settings.agentId);
+  try { prompt = await refreshSharedPrompt(target.agentDir, policyFetchers(target.settings.promptUrl), Date.now(), { primaryFamily }); } catch (error) { failures.push(refreshFailure("shared prompt", error)); }
   if (codex) {
     try { skills = await refreshCodexSkills(target.agentDir, target.settings.disabledCodexSkills); } catch (error) { failures.push(refreshFailure("skills", error)); }
   }
@@ -117,9 +133,13 @@ async function status(config: OpenClawConfig) {
   const bundle = await readOptional(join(target.agentDir, "codex-home", ".unblock-codex-prompt-bundle.json"));
   const receipt: unknown = bundle ? JSON.parse(bundle) : null;
   const remotePrompt = receipt && typeof receipt === "object" && "remotePrompt" in receipt ? receipt.remotePrompt : null;
+  const codexPolicies = runtimes.includes("codex") ? codexPoliciesReceipt(receipt) : null;
   const claudePolicy = runtimes.includes("claude-cli") ? claudePolicyReceipt(receipt) : null;
+  const configuredCodexFamily = runtimes.includes("codex") ? configuredCodexModelFamily(config, target.settings.agentId) : undefined;
   return { ...disk, frozen: true, ready, adapter, error, ...codexConfigError ? { codexConfigError } : {}, ...claude ? { claude } : {},
-    ...legacyClaudeCore.state !== "absent" ? { legacyClaudeCore } : {}, configuredPromptUrl: target.settings.promptUrl, remotePrompt, ...runtimes.includes("claude-cli") ? { claudePolicy } : {} };
+    ...legacyClaudeCore.state !== "absent" ? { legacyClaudeCore } : {}, configuredPromptUrl: target.settings.promptUrl,
+    ...configuredCodexFamily ? { configuredCodexFamily } : {}, remotePrompt,
+    ...codexPolicies ? { codexPolicies } : {}, ...runtimes.includes("claude-cli") ? { claudePolicy } : {} };
 }
 
 export default definePluginEntry({
@@ -162,8 +182,13 @@ export default definePluginEntry({
           // The oldest check among the enrolled runtimes' policies decides when the next refresh is due.
           const remote = result.remotePrompt;
           const codexChecked = remote && typeof remote === "object" && "checkedAt" in remote && typeof remote.checkedAt === "number" ? remote.checkedAt : 0;
+          const codexDefaultChecked = result.codexPolicies?.default?.checkedAt ?? codexChecked;
+          const codexGpt62Checked = result.codexPolicies?.["gpt-6.2"]?.checkedAt ?? codexChecked;
           const claudeChecked = result.claudePolicy?.checkedAt ?? 0;
-          const checkedAt = Math.min(...[codex ? codexChecked : Infinity, result.claudePolicy !== undefined ? claudeChecked : Infinity]);
+          const checkedAt = Math.min(...[
+            codex ? Math.min(codexChecked, codexDefaultChecked, codexGpt62Checked) : Infinity,
+            result.claudePolicy !== undefined ? claudeChecked : Infinity,
+          ]);
           const nextAt = Math.min(codex && target.settings.suppressExplicitDelegationPrompt ? catalog?.nextRefreshAt ?? 0 : Infinity,
             checkedAt ? checkedAt + CATALOG_REFRESH_MS : 0,
             Date.now() + CATALOG_REFRESH_MS);
@@ -267,10 +292,11 @@ export default definePluginEntry({
         let legacyClaude;
         try { legacyClaude = await planClaudeRestore(target.agentDir); }
         catch (error) { throw new Error(`Cannot remove the 0.4 Claude CLI core patch: ${errorMessage(error)}`); }
-        // Every enrolled runtime's policy is fetched before anything is written: Codex without
-        // `runtime` (any Worker version), Claude with runtime=claude. Claude-only never reads the
-        // Codex artifact. Skills are not compiled: both runtimes get the session catalog live.
-        const { compiled, remote, claudePolicy } = await fetchAndCompile({ codex, claude, promptUrl: target.settings.promptUrl, workspaceDir: target.workspaceDir });
+        // Every enrolled runtime's policy is fetched before anything is written: Codex fetches both
+        // standard (no `runtime`) and GPT-6.2 (`runtime=codex-gpt-6.2`); Claude fetches `runtime=claude`.
+        // Claude-only never reads Codex artifacts. Skills are not compiled: both runtimes get the session catalog live.
+        const primaryFamily = configuredCodexModelFamily(config, target.settings.agentId);
+        const { compiled, remote, codexPolicies, claudePolicy } = await fetchAndCompile({ codex, claude, promptUrl: target.settings.promptUrl, workspaceDir: target.workspaceDir, primaryFamily });
         const runtimes: ManagedRuntime[] = [...codex ? ["codex" as const] : [], ...claude ? ["claude-cli" as const] : []];
         const result = await syncPrompt({ ...target, ...compiled, ...codexHome ? { codexHome } : {} }, { adopt: options.adopt === true, runtimes });
         const adapter = codexPlan ? await installAdapter(target.agentDir, codexPlan) : undefined;
@@ -281,7 +307,7 @@ export default definePluginEntry({
           ? `${result.activation} The 0.4 Claude CLI patch was removed from OpenClaw core: restart the Gateway to reload the restored core.`
           : result.activation;
         console.log(JSON.stringify({ ...result, activation, adapter, detection: { resolver: detection.resolver, models: detection.detections },
-          ...remote ? { remotePrompt: remote } : {}, ...claudePolicy ? { claudePolicy } : {}, catalog, codexSkills,
+          ...remote ? { remotePrompt: remote } : {}, ...codexPolicies ? { codexPolicies } : {}, ...claudePolicy ? { claudePolicy } : {}, catalog, codexSkills,
           ...legacyClaudeCoreRestored ? { legacyClaudeCoreRestored, restartRequired: true } : {} }, null, 2));
       });
       root.command("restore").description("Restore owned prompt components; pause automatic management and retain files")

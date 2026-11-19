@@ -18,6 +18,8 @@ const SAFE_CAUSES = new Set([
   "Frozen context boundary is ambiguous; run codex-prompt sync",
   "Prompt endpoint returned HTTP 400 for runtime=claude; deploy the fleet-prompt Worker with runtime support first",
   "Prompt endpoint did not confirm runtime=claude; deploy the fleet-prompt Worker with runtime support first",
+  "Prompt endpoint returned HTTP 400 for runtime=codex-gpt-6.2; deploy the fleet-prompt Worker with runtime support first",
+  "Prompt endpoint did not confirm runtime=codex-gpt-6.2; deploy the fleet-prompt Worker with runtime support first",
   "Prompt endpoint must return plain text", "Prompt exceeds 256 KiB limit",
   "Prompt is empty or contains NUL bytes", "Prompt revision does not match response body",
   "The managed codex skills block in config.toml is damaged; restore its BEGIN/END markers or remove it",

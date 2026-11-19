@@ -131,9 +131,10 @@ const unblockLiveKey = Symbol.for("unblock-codex-prompt.live-context");
 function unblockRelay(params, part, text) {
   Object.defineProperty(params, unblockLiveKey, { value: { ...params[unblockLiveKey], [part]: text }, configurable: true, writable: true, enumerable: false });
 }
-function unblockBaseInstructions(params) {
+function unblockBaseInstructions(params, options) {
   if (!unblockManagedTarget(params)) return null;
-  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)}, params.config, params.bootstrapContextMode);
+  const modelId = options?.model ?? params.modelId ?? params.model?.id;
+  return unblockLoadBridge().readCodexBaseInstructions(${JSON.stringify(agentDir)}, params.config, params.bootstrapContextMode, modelId);
 }
 ${managedTargetSource({ name: "unblockManagedTarget", agentId, targetChanged: "Frozen bridge target changed; restore and reinstall the adapter" })}function unblockFrozenPolicy(params) {
   if (!unblockManagedTarget(params)) return null;
@@ -180,7 +181,7 @@ function patchRefreshableAdapter(sources: string[], find: (name: string) => Adap
   // turn with the new base; Codex keeps base instructions out of history and compaction. The
   // model_instructions_file pointer to the same file remains the fallback.
   const threadWrapper = `function buildCodexThreadConfiguration(params, options) {
-  const base = unblockBaseInstructions(params);
+  const base = unblockBaseInstructions(params, options);
   const request = unblockOriginalThreadConfiguration(params, options);
   return base === null ? request : { ...request, baseInstructions: base };
 }

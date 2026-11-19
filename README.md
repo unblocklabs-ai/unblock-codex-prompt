@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.6.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.7.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -11,7 +11,8 @@ See [Claude CLI agents](#claude-cli-agents).
 
 - Required `promptUrl`: the shared policy compiled from Fleet Prompt's dev/prod
   sections and served by Cloudflare. It is the only shared-policy source; the plugin
-  selects the artifact per runtime (Codex: as configured; Claude: `runtime=claude`).
+  selects the artifact per runtime and Codex model family (Codex non-6.2: as
+  configured; Codex GPT-6.2*: `runtime=codex-gpt-6.2`; Claude: `runtime=claude`).
 - Each agent's memory reference (not memory bodies).
 
 **Identity and workspace files are live.** `SOUL.md`, `IDENTITY.md`, `USER.md`
@@ -28,15 +29,21 @@ developer instructions (see below); Claude gets it through OpenClaw's native
 `openclaw-skills` Claude plugin mount. When OpenClaw mounts no such plugin it lists
 skills in its system prompt instead, and that list is dropped with the rest of that prompt.
 
-**The fleet policy is live too.** On Codex the generated file (fleet policy and memory
-reference) replaces Codex's native base through `model_instructions_file`.
-The patched adapter also sends it as each thread's `baseInstructions` when
-OpenClaw starts or resumes it (only the policy prefix on lightweight turns).
+**The fleet policy is live too.** On Codex, `sync` and daily refresh fetch both
+the standard Codex policy (as configured) and the GPT-6.2 Codex policy
+(`runtime=codex-gpt-6.2`), writing whichever matches the agent's primary model in
+`openclaw.json` into the generated file (`model_instructions_file`) and storing both
+in the verified sync receipt. The patched adapter inspects each session's active
+`modelId` (falling back to `openclaw.json`'s primary model) and sends the matching
+policy as each thread's `baseInstructions` when OpenClaw starts or resumes it (only
+the policy prefix on lightweight turns), so `gpt-6.2*` sessions and non-6.2 GPT
+sessions automatically receive their tailored prompts—including across model switches
+and fallbacks without re-syncing.
 Codex reads base instructions per session, not from
-history, and OpenClaw fingerprints these requests, so a refreshed revision resumes an
-existing thread on its next turn with the new base: no duplicate copy, nothing in
-history, and compaction cannot revert it. If the adapter is ever missing, Codex still
-reads the policy from the file. The adapter replaces OpenClaw's generic developer
+history, and OpenClaw fingerprints these requests, so a refreshed revision or model
+switch resumes an existing thread on its next turn with the new base: no duplicate
+copy, nothing in history, and compaction cannot revert it. If the adapter is ever
+missing, Codex still reads the primary policy from the file. The adapter replaces OpenClaw's generic developer
 policy with the live OpenClaw skills catalog and the live persona, in the thread
 developer instructions native children inherit, and suppresses the separate memory
 contribution. Cron guidance remains in its existing parent-local carrier. The optional
@@ -371,7 +378,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.6.0.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.7.0.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -657,7 +664,7 @@ sync.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.6.0
+npm run release:check -- v0.7.0
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -667,7 +674,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.6.0 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.7.0 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 
