@@ -17,7 +17,10 @@ function response(body = text, headers = {}) {
 
 test("remote config requires the bridge and credential-free HTTPS", () => {
   const config = { frozenContext: true, promptUrl: url };
-  assert.deepEqual(parseConfig(config), { agentId: "main", ...config, suppressExplicitDelegationPrompt: false, disabledCodexSkills: ["pages", "work-pets"] });
+  assert.deepEqual(parseConfig(config), { agentId: "main", ...config, suppressExplicitDelegationPrompt: false, disabledCodexSkills: ["documents:documents", "pages", "work-pets"] });
+  for (const disabledCodexSkills of [["pages", "work-pets"], []]) {
+    assert.deepEqual(parseConfig({ ...config, disabledCodexSkills }).disabledCodexSkills, disabledCodexSkills);
+  }
   assert.deepEqual(parseConfig({ ...config, agentName: "Bill" }), parseConfig(config));
   assert.throws(() => parseConfig({ frozenContext: true }), /promptUrl/);
   assert.throws(() => parseConfig({ promptUrl: url }), /frozenContext/);

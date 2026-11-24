@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.6.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.6.1.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -371,7 +371,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.6.0.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.6.1.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -573,10 +573,12 @@ Codex lists every skill it finds in the managed Codex home, including skills fro
 ChatGPT remote plugins that sync in on their own. `disabledCodexSkills` names the
 ones to remove: a plugin name removes all of that plugin's skills, and an exact
 skill name (`pages:write-page`, `imagegen`) removes one. It defaults to
-`["pages", "work-pets"]` (ChatGPT Pages and Pets). Other skills are untouched.
+`["documents:documents", "pages", "work-pets"]`. Disabling the Documents skill
+lets agents use existing `gogcli` access for Google Docs instead of requiring
+the OpenAI Google Drive import plugin.
 
 ```json
-"disabledCodexSkills": ["pages", "work-pets"]
+"disabledCodexSkills": ["documents:documents", "pages", "work-pets"]
 ```
 
 The plugin scans `skills/` and `plugins/cache/` under the managed Codex home and
@@ -584,8 +586,10 @@ writes one marked block of `[[skills.config]] name = "…" enabled = false` rule
 the end of `config.toml`. It re-applies the block at Gateway startup, `sync`,
 `refresh`, and the daily refresh, so newly synced plugin skills are caught.
 Codex reads the rules when its app-server starts; running sessions keep their
-list until the Gateway or app-server restarts. Set `[]` to remove the block.
-`restore` also removes it. User-authored `[[skills.config]]` entries stay as written.
+list until the Gateway or app-server restarts. An explicit list replaces the
+defaults: use `["pages", "work-pets"]` to keep Documents available, or `[]`
+to remove all managed skill rules. `restore` also removes the block.
+User-authored `[[skills.config]]` entries stay as written.
 
 ## Restore
 
@@ -657,7 +661,7 @@ sync.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.6.0
+npm run release:check -- v0.6.1
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -667,7 +671,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.6.0 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.6.1 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 

@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "unblock-codex-prompt";
-// ChatGPT Pages and Pets skills reach Codex through remote plugins and do not apply to OpenClaw agents.
-export const DEFAULT_DISABLED_CODEX_SKILLS = ["pages", "work-pets"];
+// Keep the Documents skill from routing Google Docs away from the fleet's existing gogcli access.
+export const DEFAULT_DISABLED_CODEX_SKILLS = ["documents:documents", "pages", "work-pets"];
 
 export function parseConfig(raw: unknown) {
   const value = raw ?? {};
