@@ -1,7 +1,7 @@
 # Unblock Codex Prompt
 
 A small, explicit prompt-management bridge for dedicated OpenClaw Mac agents.
-**Version 0.7.0.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
+**Version 0.7.1.** The bridge supports OpenClaw/Codex 2026.10.5 and newer
 stable releases with a reviewed context-assembly layout, and agents running
 through the Claude CLI backend, whose whole system prompt it replaces through
 OpenClaw's public `before_prompt_build` hook without patching OpenClaw core.
@@ -378,7 +378,7 @@ Claude CLI process. It uses a temporary state directory and changes nothing inst
 npm ci
 npm run preflight
 npm pack
-openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.7.0.tgz --force --accept-capabilities
+openclaw plugins install ./unblocklabs-unblock-codex-prompt-0.7.1.tgz --force --accept-capabilities
 ```
 
 Include the plugin in `plugins.allow` if applicable, then configure:
@@ -668,7 +668,7 @@ sync.
 
 ```sh
 npm run preflight
-npm run release:check -- v0.7.0
+npm run release:check -- v0.7.1
 ```
 
 Tests cover compilation, explicit refresh, native/private-body exclusion,
@@ -678,7 +678,7 @@ proof and limits.
 
 Install with
 the packed archive above for an unreleased candidate. After publication, use
-`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.7.0 --accept-capabilities`.
+`openclaw plugins install npm:@unblocklabs/unblock-codex-prompt@0.7.1 --accept-capabilities`.
 The existing [GitHub Release workflow](RELEASING.md) publishes npm only when a
 GitHub Release is published. Normal pushes do not release the package.
 
