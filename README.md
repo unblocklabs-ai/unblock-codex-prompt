@@ -580,10 +580,12 @@ Codex lists every skill it finds in the managed Codex home, including skills fro
 ChatGPT remote plugins that sync in on their own. `disabledCodexSkills` names the
 ones to remove: a plugin name removes all of that plugin's skills, and an exact
 skill name (`pages:write-page`, `imagegen`) removes one. It defaults to
-`["pages", "work-pets"]` (ChatGPT Pages and Pets). Other skills are untouched.
+`["documents:documents", "pages", "work-pets"]`. Disabling the Documents skill
+lets agents use existing `gogcli` access for Google Docs instead of requiring
+the OpenAI Google Drive import plugin.
 
 ```json
-"disabledCodexSkills": ["pages", "work-pets"]
+"disabledCodexSkills": ["documents:documents", "pages", "work-pets"]
 ```
 
 The plugin scans `skills/` and `plugins/cache/` under the managed Codex home and
@@ -591,8 +593,10 @@ writes one marked block of `[[skills.config]] name = "…" enabled = false` rule
 the end of `config.toml`. It re-applies the block at Gateway startup, `sync`,
 `refresh`, and the daily refresh, so newly synced plugin skills are caught.
 Codex reads the rules when its app-server starts; running sessions keep their
-list until the Gateway or app-server restarts. Set `[]` to remove the block.
-`restore` also removes it. User-authored `[[skills.config]]` entries stay as written.
+list until the Gateway or app-server restarts. An explicit list replaces the
+defaults: use `["pages", "work-pets"]` to keep Documents available, or `[]`
+to remove all managed skill rules. `restore` also removes the block.
+User-authored `[[skills.config]]` entries stay as written.
 
 ## Restore
 

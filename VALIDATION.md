@@ -1,5 +1,14 @@
 # Validation
 
+## Default Codex skill exclusions — 2026-11-24 (0.6.1)
+
+- Installed the packed plugin in an isolated OpenClaw 2026.10.9 Gateway.
+  Codex 0.166.0 `skills/list` reported Documents, Pages, and Pets disabled
+  after Gateway startup and after `codex-prompt refresh`.
+- Refresh with the old explicit list kept Documents enabled; `[]` removed all
+  managed exclusions. An unrelated Documents skill, a `gogcli` fixture, and a
+  user-authored disable rule retained their original states.
+
 ## Native lightweight Codex turns
 
 - OpenClaw/Codex 2026.10.9 with Codex app-server 0.166.0: a loopback Responses
